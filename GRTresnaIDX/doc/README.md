@@ -6,16 +6,18 @@ HDF5 output at `t=0` and populates `ADMBaseX` spacetime fields.
 ## Supported input (current implementation)
 
 - HDF5 file with root metadata attributes:
+  - `num_levels`
   - `num_components`
   - `component_0`, `component_1`, ...
-- One AMR level only (`num_levels = 1`) and exactly one box on `level_0`.
-- Source data datasets under `level_0`:
+- AMR hierarchy groups: `level_0`, `level_1`, ..., `level_N`
+- Multiple boxes per level via `boxes` dataset
+- Source data datasets under each level:
   - `boxes`
   - `data:offsets=0` (or `data:offsets`)
   - `data:datatype=0` (or `data:datatype=1` / `data`)
 
-This keeps the first reader implementation strict and deterministic. Unsupported
-layouts fail with explicit runtime errors.
+The reader samples from the finest level that contains each query point and
+falls back to coarser levels when needed.
 
 ## Variable basis handling
 
@@ -33,7 +35,7 @@ Source cell-center mapping follows:
 - `x = (i + 0.5) * dx - center`
 
 `center` is either:
-- auto: inferred from source index extents, or
+- auto: inferred from `level_0` source index extents, or
 - user-provided via `use_source_center=yes` and `source_center[3]`.
 
 ## Minimal parfile block

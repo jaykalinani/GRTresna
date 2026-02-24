@@ -198,7 +198,7 @@ read_real_dataset(const hid_t group,
   return out;
 }
 
-std::array<int, 6> read_single_box(const hid_t level_group) {
+std::vector<std::array<int, 6>> read_boxes_dataset(const hid_t level_group) {
   const hid_t dset = open_dataset_any(level_group, {"boxes"});
   const hid_t space = H5Dget_space(dset);
   if (space < 0) {
@@ -231,27 +231,26 @@ std::array<int, 6> read_single_box(const hid_t level_group) {
 
   const size_t nboxes =
       (dims[1] == 6) ? static_cast<size_t>(dims[0]) : static_cast<size_t>(dims[1]);
-  if (nboxes != 1) {
-    CCTK_VERROR(
-        "Current reader supports exactly one source box on level_0; file has %llu boxes",
-        static_cast<unsigned long long>(nboxes));
-  }
+  std::vector<std::array<int, 6>> boxes(nboxes);
 
-  std::array<int, 6> box{};
   if (dims[1] == 6) {
-    for (int a = 0; a < 6; ++a) {
-      box[a] = raw[static_cast<size_t>(a)];
+    for (size_t b = 0; b < nboxes; ++b) {
+      for (int a = 0; a < 6; ++a) {
+        boxes[b][a] = raw[b * 6 + static_cast<size_t>(a)];
+      }
     }
   } else {
-    for (int a = 0; a < 6; ++a) {
-      box[a] = raw[static_cast<size_t>(a * nboxes)];
+    for (size_t b = 0; b < nboxes; ++b) {
+      for (int a = 0; a < 6; ++a) {
+        boxes[b][a] = raw[static_cast<size_t>(a) * nboxes + b];
+      }
     }
   }
 
   if (H5Sclose(space) < 0 || H5Dclose(dset) < 0) {
     CCTK_VERROR("Failed to close HDF5 handles for 'boxes' dataset");
   }
-  return box;
+  return boxes;
 }
 
 inline int clamp_int(const int v, const int lo, const int hi) {
@@ -265,8 +264,8 @@ inline double lerp(const double a, const double b, const double w) {
 } // namespace
 
 GRTresnaReader::GRTresnaReader()
-    : loaded_(false), dx_(0.0), center_{{0.0, 0.0, 0.0}}, lo_{{0, 0, 0}},
-      hi_{{-1, -1, -1}}, n_with_ghost_{{0, 0, 0}}, nghost_(0), ncomp_(0),
+    : loaded_(false), center_{{0.0, 0.0, 0.0}}, num_levels_(0),
+      global_lo_{{0, 0, 0}}, global_hi_{{-1, -1, -1}}, ncomp_(0),
       has_matter_data_(false), basis_(VariableBasis::adm), idx_gxx_(-1),
       idx_gxy_(-1), idx_gxz_(-1), idx_gyy_(-1), idx_gyz_(-1), idx_gzz_(-1),
       idx_kxx_(-1), idx_kxy_(-1), idx_kxz_(-1), idx_kyy_(-1), idx_kyz_(-1),
@@ -294,6 +293,64 @@ int GRTresnaReader::component_index(const char *name, const bool required) const
     return -1;
   }
   return it->second;
+}
+
+bool GRTresnaReader::point_in_box(const SourceBox &box, const int i, const int j,
+                                  const int k) const {
+  return i >= box.lo[0] && i <= box.hi[0] && j >= box.lo[1] &&
+         j <= box.hi[1] && k >= box.lo[2] && k <= box.hi[2];
+}
+
+const GRTresnaReader::SourceBox *
+GRTresnaReader::find_box_containing(const SourceLevel &level, const int i,
+                                    const int j, const int k) const {
+  for (const auto &box : level.boxes) {
+    if (point_in_box(box, i, j, k)) {
+      return &box;
+    }
+  }
+  return nullptr;
+}
+
+bool GRTresnaReader::sample_component_at_level(const int level_idx, const int i,
+                                               const int j, const int k,
+                                               const int comp,
+                                               double &out) const {
+  if (level_idx < 0 || level_idx >= num_levels_) {
+    return false;
+  }
+  if (comp < 0 || comp >= ncomp_) {
+    return false;
+  }
+
+  const auto &level = levels_[level_idx];
+  const auto *box = find_box_containing(level, i, j, k);
+  if (box == nullptr) {
+    return false;
+  }
+
+  const int il = i - box->lo[0] + box->nghost;
+  const int jl = j - box->lo[1] + box->nghost;
+  const int kl = k - box->lo[2] + box->nghost;
+  if (il < 0 || il >= box->n_with_ghost[0] || jl < 0 ||
+      jl >= box->n_with_ghost[1] || kl < 0 || kl >= box->n_with_ghost[2]) {
+    return false;
+  }
+
+  const size_t idx_cell =
+      static_cast<size_t>(il) +
+      static_cast<size_t>(box->n_with_ghost[0]) *
+          (static_cast<size_t>(jl) +
+           static_cast<size_t>(box->n_with_ghost[1]) * static_cast<size_t>(kl));
+  const size_t idx = box->begin + idx_cell * static_cast<size_t>(ncomp_) +
+                     static_cast<size_t>(comp);
+
+  if (idx >= box->end || idx >= level.data.size()) {
+    return false;
+  }
+
+  out = level.data[idx];
+  return true;
 }
 
 void GRTresnaReader::detect_variable_basis() {
@@ -406,17 +463,26 @@ void GRTresnaReader::load_file(const std::string &filename,
   loaded_ = false;
   config_ = config;
   comp_to_index_.clear();
-  data_.clear();
+  levels_.clear();
 
   const hid_t file_id = H5Fopen(filename.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
   if (file_id < 0) {
     CCTK_VERROR("Could not open GRTresna input file '%s'", filename.c_str());
   }
 
-  const int num_levels = read_int_attribute(file_id, "num_levels", false, 1);
-  if (num_levels != 1) {
-    CCTK_VERROR("Current reader supports only num_levels=1; file has num_levels=%d",
-                num_levels);
+  int num_levels = read_int_attribute(file_id, "num_levels", false, 0);
+  if (num_levels <= 0) {
+    num_levels = 0;
+    for (int lev = 0;; ++lev) {
+      const std::string group_name = "level_" + std::to_string(lev);
+      if (H5Lexists(file_id, group_name.c_str(), H5P_DEFAULT) <= 0) {
+        break;
+      }
+      ++num_levels;
+    }
+  }
+  if (num_levels <= 0) {
+    CCTK_VERROR("Could not determine num_levels from source metadata");
   }
 
   ncomp_ = read_int_attribute(file_id, "num_components", false, 0);
@@ -436,140 +502,373 @@ void GRTresnaReader::load_file(const std::string &filename,
 
   for (int i = 0; i < ncomp_; ++i) {
     const std::string attr_name = "component_" + std::to_string(i);
-    const std::string var_name = normalize_name(read_string_attribute(file_id, attr_name));
+    const std::string var_name =
+        normalize_name(read_string_attribute(file_id, attr_name));
     comp_to_index_[var_name] = i;
   }
 
   detect_variable_basis();
 
-  const hid_t level_group = H5Gopen2(file_id, "level_0", H5P_DEFAULT);
-  if (level_group < 0) {
-    CCTK_VERROR("Missing required HDF5 group 'level_0' in source file");
-  }
+  levels_.reserve(static_cast<size_t>(num_levels));
+  for (int lev = 0; lev < num_levels; ++lev) {
+    const std::string group_name = "level_" + std::to_string(lev);
+    const hid_t level_group = H5Gopen2(file_id, group_name.c_str(), H5P_DEFAULT);
+    if (level_group < 0) {
+      CCTK_VERROR("Missing required HDF5 group '%s' in source file",
+                  group_name.c_str());
+    }
 
-  dx_ = read_real_attribute(level_group, "dx", true, 0.0);
-  const std::array<int, 6> box = read_single_box(level_group);
-  lo_ = {{box[0], box[1], box[2]}};
-  hi_ = {{box[3], box[4], box[5]}};
+    SourceLevel level;
+    level.dx = read_real_attribute(level_group, "dx", true, 0.0);
+    if (!(level.dx > 0.0 && std::isfinite(level.dx))) {
+      CCTK_VERROR("Invalid or missing positive dx on group '%s'",
+                  group_name.c_str());
+    }
+    level.lo_union = {{std::numeric_limits<int>::max(),
+                       std::numeric_limits<int>::max(),
+                       std::numeric_limits<int>::max()}};
+    level.hi_union = {{std::numeric_limits<int>::lowest(),
+                       std::numeric_limits<int>::lowest(),
+                       std::numeric_limits<int>::lowest()}};
 
-  const auto offsets =
-      read_int64_dataset(level_group, {"data:offsets=0", "data:offsets"});
-  if (offsets.size() != 2) {
-    CCTK_VERROR(
-        "Expected exactly 2 offsets for single-box input; found %llu entries",
-        static_cast<unsigned long long>(offsets.size()));
-  }
-  if (offsets[0] < 0 || offsets[1] <= offsets[0]) {
-    CCTK_VERROR("Invalid offsets in source file: [%lld, %lld]",
-                static_cast<long long>(offsets[0]),
-                static_cast<long long>(offsets[1]));
-  }
+    const auto boxes_raw = read_boxes_dataset(level_group);
+    if (boxes_raw.empty()) {
+      CCTK_VERROR("No boxes found in HDF5 group '%s'", group_name.c_str());
+    }
 
-  const auto raw_data =
-      read_real_dataset(level_group, {"data:datatype=0", "data:datatype=1", "data"});
-  const size_t begin = static_cast<size_t>(offsets[0]);
-  const size_t end = static_cast<size_t>(offsets[1]);
-  if (end > raw_data.size()) {
-    CCTK_VERROR(
-        "Source data shorter than declared offsets: end=%llu, data_size=%llu",
-        static_cast<unsigned long long>(end),
-        static_cast<unsigned long long>(raw_data.size()));
-  }
+    const auto offsets =
+        read_int64_dataset(level_group, {"data:offsets=0", "data:offsets"});
+    if (offsets.size() != boxes_raw.size() + 1) {
+      CCTK_VERROR(
+          "Expected %llu offsets for %llu boxes in group '%s', found %llu",
+          static_cast<unsigned long long>(boxes_raw.size() + 1),
+          static_cast<unsigned long long>(boxes_raw.size()), group_name.c_str(),
+          static_cast<unsigned long long>(offsets.size()));
+    }
 
-  const size_t values_in_box = end - begin;
-  if (values_in_box % static_cast<size_t>(ncomp_) != 0) {
-    CCTK_VERROR(
-        "Data length for level_0 box (%llu) is not divisible by num_components (%d)",
-        static_cast<unsigned long long>(values_in_box), ncomp_);
-  }
+    const auto raw_data =
+        read_real_dataset(level_group,
+                          {"data:datatype=0", "data:datatype=1", "data"});
 
-  const int nx = hi_[0] - lo_[0] + 1;
-  const int ny = hi_[1] - lo_[1] + 1;
-  const int nz = hi_[2] - lo_[2] + 1;
-  if (nx <= 0 || ny <= 0 || nz <= 0) {
-    CCTK_VERROR("Invalid source box extents: lo=(%d,%d,%d), hi=(%d,%d,%d)", lo_[0],
-                lo_[1], lo_[2], hi_[0], hi_[1], hi_[2]);
-  }
+    level.boxes.reserve(boxes_raw.size());
+    for (size_t bi = 0; bi < boxes_raw.size(); ++bi) {
+      const long long begin_ll = offsets[bi];
+      const long long end_ll = offsets[bi + 1];
+      if (begin_ll < 0 || end_ll <= begin_ll) {
+        CCTK_VERROR(
+            "Invalid offsets [%lld, %lld] for box %llu in group '%s'",
+            static_cast<long long>(begin_ll), static_cast<long long>(end_ll),
+            static_cast<unsigned long long>(bi), group_name.c_str());
+      }
+      if (static_cast<size_t>(end_ll) > raw_data.size()) {
+        CCTK_VERROR(
+            "Source data too short in group '%s': end=%llu data_size=%llu",
+            group_name.c_str(), static_cast<unsigned long long>(end_ll),
+            static_cast<unsigned long long>(raw_data.size()));
+      }
 
-  const long long cells_with_ghost =
-      static_cast<long long>(values_in_box / static_cast<size_t>(ncomp_));
+      SourceBox box;
+      box.lo = {{boxes_raw[bi][0], boxes_raw[bi][1], boxes_raw[bi][2]}};
+      box.hi = {{boxes_raw[bi][3], boxes_raw[bi][4], boxes_raw[bi][5]}};
+      box.begin = static_cast<size_t>(begin_ll);
+      box.end = static_cast<size_t>(end_ll);
 
-  bool found_ghost = false;
-  for (int g = 0; g <= 64; ++g) {
-    const long long candidate =
-        static_cast<long long>(nx + 2 * g) * static_cast<long long>(ny + 2 * g) *
-        static_cast<long long>(nz + 2 * g);
-    if (candidate == cells_with_ghost) {
-      nghost_ = g;
-      found_ghost = true;
-      break;
+      const int nx = box.hi[0] - box.lo[0] + 1;
+      const int ny = box.hi[1] - box.lo[1] + 1;
+      const int nz = box.hi[2] - box.lo[2] + 1;
+      if (nx <= 0 || ny <= 0 || nz <= 0) {
+        CCTK_VERROR(
+            "Invalid source box extents in '%s': lo=(%d,%d,%d), hi=(%d,%d,%d)",
+            group_name.c_str(), box.lo[0], box.lo[1], box.lo[2], box.hi[0],
+            box.hi[1], box.hi[2]);
+      }
+
+      const size_t values_in_box = box.end - box.begin;
+      if (values_in_box % static_cast<size_t>(ncomp_) != 0) {
+        CCTK_VERROR(
+            "Data length for box %llu in '%s' (%llu) is not divisible by num_components (%d)",
+            static_cast<unsigned long long>(bi), group_name.c_str(),
+            static_cast<unsigned long long>(values_in_box), ncomp_);
+      }
+      const long long cells_with_ghost =
+          static_cast<long long>(values_in_box / static_cast<size_t>(ncomp_));
+
+      bool found_ghost = false;
+      for (int g = 0; g <= 64; ++g) {
+        const long long candidate =
+            static_cast<long long>(nx + 2 * g) *
+            static_cast<long long>(ny + 2 * g) *
+            static_cast<long long>(nz + 2 * g);
+        if (candidate == cells_with_ghost) {
+          box.nghost = g;
+          box.n_with_ghost = {{nx + 2 * g, ny + 2 * g, nz + 2 * g}};
+          found_ghost = true;
+          break;
+        }
+      }
+      if (!found_ghost) {
+        CCTK_VERROR(
+            "Could not infer ghost-zone width for box %llu in '%s': nx=%d ny=%d nz=%d cells_with_ghost=%lld",
+            static_cast<unsigned long long>(bi), group_name.c_str(), nx, ny,
+            nz, cells_with_ghost);
+      }
+
+      level.lo_union[0] = std::min(level.lo_union[0], box.lo[0]);
+      level.lo_union[1] = std::min(level.lo_union[1], box.lo[1]);
+      level.lo_union[2] = std::min(level.lo_union[2], box.lo[2]);
+      level.hi_union[0] = std::max(level.hi_union[0], box.hi[0]);
+      level.hi_union[1] = std::max(level.hi_union[1], box.hi[1]);
+      level.hi_union[2] = std::max(level.hi_union[2], box.hi[2]);
+
+      level.boxes.push_back(box);
+    }
+
+    level.data = raw_data;
+    levels_.push_back(level);
+
+    if (H5Gclose(level_group) < 0) {
+      CCTK_VERROR("Failed to close HDF5 group '%s'", group_name.c_str());
     }
   }
-  if (!found_ghost) {
-    CCTK_VERROR(
-        "Could not infer ghost-zone width from source data layout: nx=%d ny=%d nz=%d "
-        "cells_with_ghost=%lld ncomp=%d",
-        nx, ny, nz, cells_with_ghost, ncomp_);
+
+  if (H5Fclose(file_id) < 0) {
+    CCTK_VERROR("Failed to close HDF5 file '%s'", filename.c_str());
   }
 
-  n_with_ghost_ = {{nx + 2 * nghost_, ny + 2 * nghost_, nz + 2 * nghost_}};
-  data_.assign(raw_data.begin() + static_cast<long long>(begin),
-               raw_data.begin() + static_cast<long long>(end));
+  num_levels_ = static_cast<int>(levels_.size());
+  global_lo_ = levels_[0].lo_union;
+  global_hi_ = levels_[0].hi_union;
 
   if (config_.use_source_center) {
     center_ = config_.source_center;
   } else {
+    const double dx0 = levels_[0].dx;
     for (int d = 0; d < 3; ++d) {
-      center_[d] = 0.5 * static_cast<double>(lo_[d] + hi_[d] + 1) * dx_;
+      center_[d] =
+          0.5 * static_cast<double>(global_lo_[d] + global_hi_[d] + 1) * dx0;
     }
   }
 
-  has_matter_data_ =
-      (component_index("phi", false) >= 0 && component_index("pi", false) >= 0);
-
-  if (H5Gclose(level_group) < 0 || H5Fclose(file_id) < 0) {
-    CCTK_VERROR("Failed to close HDF5 handles while finishing source read");
-  }
+  has_matter_data_ = (component_index("phi", false) >= 0 &&
+                      component_index("pi", false) >= 0);
 
   loaded_ = true;
 
   if (config_.verbosity >= 1) {
+    size_t total_boxes = 0;
+    for (const auto &level : levels_) {
+      total_boxes += level.boxes.size();
+    }
+
     CCTK_VINFO(
-        "GRTresnaIDX loaded '%s': dx=%e, box=[(%d,%d,%d) -> (%d,%d,%d)], nghost=%d, "
-        "ncomp=%d, basis=%s",
-        filename.c_str(), dx_, lo_[0], lo_[1], lo_[2], hi_[0], hi_[1], hi_[2],
-        nghost_, ncomp_, (basis_ == VariableBasis::adm ? "ADM" : "BSSN-like"));
+        "GRTresnaIDX loaded '%s': levels=%d, boxes=%llu, ncomp=%d, dx0=%e, "
+        "coarse_box=[(%d,%d,%d)->(%d,%d,%d)], basis=%s",
+        filename.c_str(), num_levels_,
+        static_cast<unsigned long long>(total_boxes), ncomp_, levels_[0].dx,
+        global_lo_[0], global_lo_[1], global_lo_[2], global_hi_[0],
+        global_hi_[1], global_hi_[2],
+        (basis_ == VariableBasis::adm ? "ADM" : "BSSN-like"));
   }
 }
 
-double GRTresnaReader::cell_value(const int i, const int j, const int k,
-                                  const int comp, bool &ok) const {
-  const int il = i - lo_[0] + nghost_;
-  const int jl = j - lo_[1] + nghost_;
-  const int kl = k - lo_[2] + nghost_;
+double GRTresnaReader::sample_component_nearest(
+    const int comp, const double x, const double y, const double z,
+    const OutOfBoundsPolicy oob_policy, bool &ok) const {
+  for (int lev = num_levels_ - 1; lev >= 0; --lev) {
+    const auto &level = levels_[lev];
+    const int ix = static_cast<int>(std::llround((x + center_[0]) / level.dx - 0.5));
+    const int iy = static_cast<int>(std::llround((y + center_[1]) / level.dx - 0.5));
+    const int iz = static_cast<int>(std::llround((z + center_[2]) / level.dx - 0.5));
 
-  if (il < 0 || il >= n_with_ghost_[0] || jl < 0 || jl >= n_with_ghost_[1] ||
-      kl < 0 || kl >= n_with_ghost_[2]) {
-    ok = false;
-    return 0.0;
+    double value = 0.0;
+    if (sample_component_at_level(lev, ix, iy, iz, comp, value)) {
+      return value;
+    }
   }
-  if (comp < 0 || comp >= ncomp_) {
+
+  if (oob_policy == OutOfBoundsPolicy::error) {
     ok = false;
     return 0.0;
   }
 
-  const size_t idx_cell =
-      static_cast<size_t>(il) +
-      static_cast<size_t>(n_with_ghost_[0]) *
-          (static_cast<size_t>(jl) +
-           static_cast<size_t>(n_with_ghost_[1]) * static_cast<size_t>(kl));
-  const size_t idx = idx_cell * static_cast<size_t>(ncomp_) +
-                     static_cast<size_t>(comp);
-  if (idx >= data_.size()) {
+  // Clamp fallback
+  for (int lev = num_levels_ - 1; lev >= 0; --lev) {
+    const auto &level = levels_[lev];
+    int ix = static_cast<int>(std::llround((x + center_[0]) / level.dx - 0.5));
+    int iy = static_cast<int>(std::llround((y + center_[1]) / level.dx - 0.5));
+    int iz = static_cast<int>(std::llround((z + center_[2]) / level.dx - 0.5));
+
+    ix = clamp_int(ix, level.lo_union[0], level.hi_union[0]);
+    iy = clamp_int(iy, level.lo_union[1], level.hi_union[1]);
+    iz = clamp_int(iz, level.lo_union[2], level.hi_union[2]);
+
+    double value = 0.0;
+    if (sample_component_at_level(lev, ix, iy, iz, comp, value)) {
+      return value;
+    }
+  }
+
+  ok = false;
+  return 0.0;
+}
+
+double GRTresnaReader::sample_component_trilinear(
+    const int comp, const double x, const double y, const double z,
+    const OutOfBoundsPolicy oob_policy, bool &ok) const {
+  int lev_sel = -1;
+  int ix0 = 0, iy0 = 0, iz0 = 0;
+  double wx = 0.0, wy = 0.0, wz = 0.0;
+
+  for (int lev = num_levels_ - 1; lev >= 0; --lev) {
+    const auto &level = levels_[lev];
+    const double gx = (x + center_[0]) / level.dx - 0.5;
+    const double gy = (y + center_[1]) / level.dx - 0.5;
+    const double gz = (z + center_[2]) / level.dx - 0.5;
+
+    const int tx0 = static_cast<int>(std::floor(gx));
+    const int ty0 = static_cast<int>(std::floor(gy));
+    const int tz0 = static_cast<int>(std::floor(gz));
+
+    if (find_box_containing(level, tx0, ty0, tz0) != nullptr) {
+      lev_sel = lev;
+      ix0 = tx0;
+      iy0 = ty0;
+      iz0 = tz0;
+      wx = gx - static_cast<double>(ix0);
+      wy = gy - static_cast<double>(iy0);
+      wz = gz - static_cast<double>(iz0);
+      break;
+    }
+  }
+
+  if (lev_sel < 0) {
+    if (oob_policy == OutOfBoundsPolicy::error) {
+      ok = false;
+      return 0.0;
+    }
+
+    lev_sel = 0;
+    const auto &level = levels_[lev_sel];
+    const double gx = (x + center_[0]) / level.dx - 0.5;
+    const double gy = (y + center_[1]) / level.dx - 0.5;
+    const double gz = (z + center_[2]) / level.dx - 0.5;
+
+    ix0 = static_cast<int>(std::floor(gx));
+    iy0 = static_cast<int>(std::floor(gy));
+    iz0 = static_cast<int>(std::floor(gz));
+    wx = gx - static_cast<double>(ix0);
+    wy = gy - static_cast<double>(iy0);
+    wz = gz - static_cast<double>(iz0);
+  }
+
+  const auto &level = levels_[lev_sel];
+
+  if (oob_policy == OutOfBoundsPolicy::clamp) {
+    if (level.hi_union[0] <= level.lo_union[0]) {
+      ix0 = level.lo_union[0];
+      wx = 0.0;
+    } else {
+      if (ix0 < level.lo_union[0]) {
+        ix0 = level.lo_union[0];
+        wx = 0.0;
+      }
+      if (ix0 >= level.hi_union[0]) {
+        ix0 = level.hi_union[0] - 1;
+        wx = 1.0;
+      }
+    }
+
+    if (level.hi_union[1] <= level.lo_union[1]) {
+      iy0 = level.lo_union[1];
+      wy = 0.0;
+    } else {
+      if (iy0 < level.lo_union[1]) {
+        iy0 = level.lo_union[1];
+        wy = 0.0;
+      }
+      if (iy0 >= level.hi_union[1]) {
+        iy0 = level.hi_union[1] - 1;
+        wy = 1.0;
+      }
+    }
+
+    if (level.hi_union[2] <= level.lo_union[2]) {
+      iz0 = level.lo_union[2];
+      wz = 0.0;
+    } else {
+      if (iz0 < level.lo_union[2]) {
+        iz0 = level.lo_union[2];
+        wz = 0.0;
+      }
+      if (iz0 >= level.hi_union[2]) {
+        iz0 = level.hi_union[2] - 1;
+        wz = 1.0;
+      }
+    }
+  } else {
+    if (ix0 < level.lo_union[0] || ix0 >= level.hi_union[0] ||
+        iy0 < level.lo_union[1] || iy0 >= level.hi_union[1] ||
+        iz0 < level.lo_union[2] || iz0 >= level.hi_union[2]) {
+      ok = false;
+      return 0.0;
+    }
+  }
+
+  const int ix1 = std::min(ix0 + 1, level.hi_union[0]);
+  const int iy1 = std::min(iy0 + 1, level.hi_union[1]);
+  const int iz1 = std::min(iz0 + 1, level.hi_union[2]);
+
+  auto fetch_value = [&](const int i, const int j, const int k,
+                         double &value) {
+    if (sample_component_at_level(lev_sel, i, j, k, comp, value)) {
+      return true;
+    }
+
+    const double xc = (static_cast<double>(i) + 0.5) * level.dx - center_[0];
+    const double yc = (static_cast<double>(j) + 0.5) * level.dx - center_[1];
+    const double zc = (static_cast<double>(k) + 0.5) * level.dx - center_[2];
+
+    for (int lev = lev_sel - 1; lev >= 0; --lev) {
+      const auto &coarse = levels_[lev];
+      const int ic =
+          static_cast<int>(std::llround((xc + center_[0]) / coarse.dx - 0.5));
+      const int jc =
+          static_cast<int>(std::llround((yc + center_[1]) / coarse.dx - 0.5));
+      const int kc =
+          static_cast<int>(std::llround((zc + center_[2]) / coarse.dx - 0.5));
+      if (sample_component_at_level(lev, ic, jc, kc, comp, value)) {
+        return true;
+      }
+    }
+
+    if (oob_policy == OutOfBoundsPolicy::clamp) {
+      bool ok_local = true;
+      value = sample_component_nearest(comp, xc, yc, zc,
+                                       OutOfBoundsPolicy::clamp, ok_local);
+      return ok_local;
+    }
+
+    return false;
+  };
+
+  double c000 = 0.0, c100 = 0.0, c010 = 0.0, c110 = 0.0;
+  double c001 = 0.0, c101 = 0.0, c011 = 0.0, c111 = 0.0;
+
+  if (!fetch_value(ix0, iy0, iz0, c000) || !fetch_value(ix1, iy0, iz0, c100) ||
+      !fetch_value(ix0, iy1, iz0, c010) || !fetch_value(ix1, iy1, iz0, c110) ||
+      !fetch_value(ix0, iy0, iz1, c001) || !fetch_value(ix1, iy0, iz1, c101) ||
+      !fetch_value(ix0, iy1, iz1, c011) || !fetch_value(ix1, iy1, iz1, c111)) {
     ok = false;
     return 0.0;
   }
-  return data_[idx];
+
+  const double c00 = lerp(c000, c100, wx);
+  const double c10 = lerp(c010, c110, wx);
+  const double c01 = lerp(c001, c101, wx);
+  const double c11 = lerp(c011, c111, wx);
+  const double c0 = lerp(c00, c10, wy);
+  const double c1 = lerp(c01, c11, wy);
+  return lerp(c0, c1, wz);
 }
 
 double GRTresnaReader::sample_component(const int comp, const double x,
@@ -582,110 +881,10 @@ double GRTresnaReader::sample_component(const int comp, const double x,
     return 0.0;
   }
 
-  const double gx = (x + center_[0]) / dx_ - 0.5;
-  const double gy = (y + center_[1]) / dx_ - 0.5;
-  const double gz = (z + center_[2]) / dx_ - 0.5;
-
   if (method == InterpolationMethod::nearest) {
-    int ix = static_cast<int>(std::llround(gx));
-    int iy = static_cast<int>(std::llround(gy));
-    int iz = static_cast<int>(std::llround(gz));
-
-    if (oob_policy == OutOfBoundsPolicy::clamp) {
-      ix = clamp_int(ix, lo_[0], hi_[0]);
-      iy = clamp_int(iy, lo_[1], hi_[1]);
-      iz = clamp_int(iz, lo_[2], hi_[2]);
-    } else {
-      if (ix < lo_[0] || ix > hi_[0] || iy < lo_[1] || iy > hi_[1] || iz < lo_[2] ||
-          iz > hi_[2]) {
-        ok = false;
-        return 0.0;
-      }
-    }
-
-    return cell_value(ix, iy, iz, comp, ok);
+    return sample_component_nearest(comp, x, y, z, oob_policy, ok);
   }
-
-  int ix0 = static_cast<int>(std::floor(gx));
-  int iy0 = static_cast<int>(std::floor(gy));
-  int iz0 = static_cast<int>(std::floor(gz));
-  double wx = gx - static_cast<double>(ix0);
-  double wy = gy - static_cast<double>(iy0);
-  double wz = gz - static_cast<double>(iz0);
-
-  if (oob_policy == OutOfBoundsPolicy::clamp) {
-    if (hi_[0] <= lo_[0]) {
-      ix0 = lo_[0];
-      wx = 0.0;
-    } else {
-      if (ix0 < lo_[0]) {
-        ix0 = lo_[0];
-        wx = 0.0;
-      }
-      if (ix0 >= hi_[0]) {
-        ix0 = hi_[0] - 1;
-        wx = 1.0;
-      }
-    }
-
-    if (hi_[1] <= lo_[1]) {
-      iy0 = lo_[1];
-      wy = 0.0;
-    } else {
-      if (iy0 < lo_[1]) {
-        iy0 = lo_[1];
-        wy = 0.0;
-      }
-      if (iy0 >= hi_[1]) {
-        iy0 = hi_[1] - 1;
-        wy = 1.0;
-      }
-    }
-
-    if (hi_[2] <= lo_[2]) {
-      iz0 = lo_[2];
-      wz = 0.0;
-    } else {
-      if (iz0 < lo_[2]) {
-        iz0 = lo_[2];
-        wz = 0.0;
-      }
-      if (iz0 >= hi_[2]) {
-        iz0 = hi_[2] - 1;
-        wz = 1.0;
-      }
-    }
-  } else {
-    if (ix0 < lo_[0] || ix0 >= hi_[0] || iy0 < lo_[1] || iy0 >= hi_[1] ||
-        iz0 < lo_[2] || iz0 >= hi_[2]) {
-      ok = false;
-      return 0.0;
-    }
-  }
-
-  const int ix1 = std::min(ix0 + 1, hi_[0]);
-  const int iy1 = std::min(iy0 + 1, hi_[1]);
-  const int iz1 = std::min(iz0 + 1, hi_[2]);
-
-  const double c000 = cell_value(ix0, iy0, iz0, comp, ok);
-  const double c100 = cell_value(ix1, iy0, iz0, comp, ok);
-  const double c010 = cell_value(ix0, iy1, iz0, comp, ok);
-  const double c110 = cell_value(ix1, iy1, iz0, comp, ok);
-  const double c001 = cell_value(ix0, iy0, iz1, comp, ok);
-  const double c101 = cell_value(ix1, iy0, iz1, comp, ok);
-  const double c011 = cell_value(ix0, iy1, iz1, comp, ok);
-  const double c111 = cell_value(ix1, iy1, iz1, comp, ok);
-  if (!ok) {
-    return 0.0;
-  }
-
-  const double c00 = lerp(c000, c100, wx);
-  const double c10 = lerp(c010, c110, wx);
-  const double c01 = lerp(c001, c101, wx);
-  const double c11 = lerp(c011, c111, wx);
-  const double c0 = lerp(c00, c10, wy);
-  const double c1 = lerp(c01, c11, wy);
-  return lerp(c0, c1, wz);
+  return sample_component_trilinear(comp, x, y, z, oob_policy, ok);
 }
 
 bool GRTresnaReader::sample_adm(const double x, const double y, const double z,

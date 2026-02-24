@@ -39,24 +39,36 @@ public:
 private:
   enum class VariableBasis { adm, bssn };
 
+  struct SourceBox {
+    std::array<int, 3> lo;
+    std::array<int, 3> hi;
+    std::array<int, 3> n_with_ghost;
+    int nghost;
+    std::size_t begin;
+    std::size_t end;
+  };
+
+  struct SourceLevel {
+    double dx;
+    std::array<int, 3> lo_union;
+    std::array<int, 3> hi_union;
+    std::vector<SourceBox> boxes;
+    std::vector<double> data;
+  };
+
   bool loaded_;
   ReaderConfig config_;
 
-  // Current implementation supports level_0 with exactly one box.
-  double dx_;
   std::array<double, 3> center_;
-  std::array<int, 3> lo_;
-  std::array<int, 3> hi_;
-  std::array<int, 3> n_with_ghost_;
-  int nghost_;
+  int num_levels_;
+  std::array<int, 3> global_lo_;
+  std::array<int, 3> global_hi_;
   int ncomp_;
 
   bool has_matter_data_;
   VariableBasis basis_;
   std::unordered_map<std::string, int> comp_to_index_;
-
-  // Stored as [cell_index * ncomp + component]
-  std::vector<double> data_;
+  std::vector<SourceLevel> levels_;
 
   // ADM basis indices
   int idx_gxx_, idx_gxy_, idx_gxz_, idx_gyy_, idx_gyz_, idx_gzz_;
@@ -73,10 +85,23 @@ private:
 
   void detect_variable_basis();
   int component_index(const char *name, bool required) const;
+
+  bool point_in_box(const SourceBox &box, int i, int j, int k) const;
+  const SourceBox *find_box_containing(const SourceLevel &level, int i, int j,
+                                       int k) const;
+  bool sample_component_at_level(int level_idx, int i, int j, int k, int comp,
+                                 double &out) const;
+
+  double sample_component_nearest(int comp, double x, double y, double z,
+                                  OutOfBoundsPolicy oob_policy,
+                                  bool &ok) const;
+  double sample_component_trilinear(int comp, double x, double y, double z,
+                                    OutOfBoundsPolicy oob_policy,
+                                    bool &ok) const;
+
   double sample_component(int comp, double x, double y, double z,
                           InterpolationMethod method,
                           OutOfBoundsPolicy oob_policy, bool &ok) const;
-  double cell_value(int i, int j, int k, int comp, bool &ok) const;
 
   static std::string normalize_name(std::string name);
 };
