@@ -94,6 +94,13 @@ extern "C" void GRTresnaIDX_InitialData(CCTK_ARGUMENTS) {
   DECLARE_CCTK_ARGUMENTSX_GRTresnaIDX_InitialData;
   DECLARE_CCTK_PARAMETERS;
 
+  const bool write_metric_curv = CCTK_EQUALS(initial_data, "GRTresnaIDX");
+  const bool write_lapse = CCTK_EQUALS(initial_lapse, "GRTresnaIDX");
+  const bool write_shift = CCTK_EQUALS(initial_shift, "GRTresnaIDX");
+  if (!(write_metric_curv || write_lapse || write_shift)) {
+    return;
+  }
+
   ReaderConfig config;
   config.use_source_center = use_source_center;
   config.source_center = {{source_center[0], source_center[1], source_center[2]}};
@@ -125,6 +132,7 @@ extern "C" void GRTresnaIDX_InitialData(CCTK_ARGUMENTS) {
                                           : OutOfBoundsPolicy::clamp;
 
   std::atomic<bool> sample_failed(false);
+  const bool do_sanity_checks = sanity_checks && write_metric_curv;
 
   double local_min_det = std::numeric_limits<double>::infinity();
   double local_max_det = -std::numeric_limits<double>::infinity();
@@ -143,33 +151,40 @@ extern "C" void GRTresnaIDX_InitialData(CCTK_ARGUMENTS) {
         }
 
         ADMSample s{};
-        const bool ok =
-            reader->sample_adm(p.x, p.y, p.z, interp_method, oob_policy, s);
+        const bool ok = reader->sample_adm(p.x, p.y, p.z, interp_method,
+                                           oob_policy, s, write_metric_curv,
+                                           write_lapse, write_shift);
         if (!ok) {
           sample_failed.store(true, std::memory_order_relaxed);
           return;
         }
 
-        gxx(p.I) = s.gxx;
-        gxy(p.I) = s.gxy;
-        gxz(p.I) = s.gxz;
-        gyy(p.I) = s.gyy;
-        gyz(p.I) = s.gyz;
-        gzz(p.I) = s.gzz;
+        if (write_metric_curv) {
+          gxx(p.I) = s.gxx;
+          gxy(p.I) = s.gxy;
+          gxz(p.I) = s.gxz;
+          gyy(p.I) = s.gyy;
+          gyz(p.I) = s.gyz;
+          gzz(p.I) = s.gzz;
 
-        kxx(p.I) = s.kxx;
-        kxy(p.I) = s.kxy;
-        kxz(p.I) = s.kxz;
-        kyy(p.I) = s.kyy;
-        kyz(p.I) = s.kyz;
-        kzz(p.I) = s.kzz;
+          kxx(p.I) = s.kxx;
+          kxy(p.I) = s.kxy;
+          kxz(p.I) = s.kxz;
+          kyy(p.I) = s.kyy;
+          kyz(p.I) = s.kyz;
+          kzz(p.I) = s.kzz;
+        }
 
-        alp(p.I) = s.alp;
-        betax(p.I) = s.betax;
-        betay(p.I) = s.betay;
-        betaz(p.I) = s.betaz;
+        if (write_lapse) {
+          alp(p.I) = s.alp;
+        }
+        if (write_shift) {
+          betax(p.I) = s.betax;
+          betay(p.I) = s.betay;
+          betaz(p.I) = s.betaz;
+        }
 
-        if (sanity_checks) {
+        if (do_sanity_checks) {
           const double det = det3(s);
           double trk = std::numeric_limits<double>::quiet_NaN();
           double igxx = 0.0, igxy = 0.0, igxz = 0.0, igyy = 0.0, igyz = 0.0,
@@ -207,7 +222,7 @@ extern "C" void GRTresnaIDX_InitialData(CCTK_ARGUMENTS) {
                "GRTresnaIDX: read_matter=yes, but no matter components found in source file");
   }
 
-  if (sanity_checks) {
+  if (do_sanity_checks) {
     if (!std::isfinite(local_min_det)) {
       local_min_det = 0.0;
       local_max_det = 0.0;

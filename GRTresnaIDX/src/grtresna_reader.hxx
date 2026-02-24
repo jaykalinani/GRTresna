@@ -31,7 +31,9 @@ public:
   void load_file(const std::string &filename, const ReaderConfig &config);
 
   bool sample_adm(double x, double y, double z, InterpolationMethod method,
-                  OutOfBoundsPolicy oob_policy, ADMSample &out) const;
+                  OutOfBoundsPolicy oob_policy, ADMSample &out,
+                  bool need_metric_curv = true, bool need_lapse = true,
+                  bool need_shift = true) const;
 
   bool is_loaded() const { return loaded_; }
   bool has_matter_data() const { return has_matter_data_; }

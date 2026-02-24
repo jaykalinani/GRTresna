@@ -3,6 +3,11 @@
 `GRTresnaIDX` is a CarpetX-native initial data reader thorn that loads GRTresna
 HDF5 output at `t=0` and populates `ADMBaseX` spacetime fields.
 
+Writes are keyword-selective:
+- `initial_data = GRTresnaIDX` writes metric + extrinsic curvature
+- `initial_lapse = GRTresnaIDX` writes lapse
+- `initial_shift = GRTresnaIDX` writes shift
+
 ## Supported input (current implementation)
 
 - HDF5 file with root metadata attributes:

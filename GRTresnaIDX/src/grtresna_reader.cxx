@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <cctk.h>
@@ -253,6 +254,38 @@ std::vector<std::array<int, 6>> read_boxes_dataset(const hid_t level_group) {
   return boxes;
 }
 
+std::vector<std::array<std::size_t, 2>>
+decode_box_offsets(const std::vector<long long> &offsets, const size_t nboxes,
+                   const std::string &group_name) {
+  if (!(offsets.size() == nboxes + 1 || offsets.size() == 2 * nboxes)) {
+    CCTK_VERROR(
+        "Unsupported offsets layout in group '%s': found %llu entries for %llu boxes "
+        "(expected nboxes+1 or 2*nboxes)",
+        group_name.c_str(), static_cast<unsigned long long>(offsets.size()),
+        static_cast<unsigned long long>(nboxes));
+  }
+
+  std::vector<std::array<std::size_t, 2>> box_offsets(nboxes);
+  for (size_t bi = 0; bi < nboxes; ++bi) {
+    const long long begin_ll =
+        (offsets.size() == nboxes + 1) ? offsets[bi] : offsets[2 * bi];
+    const long long end_ll =
+        (offsets.size() == nboxes + 1) ? offsets[bi + 1] : offsets[2 * bi + 1];
+
+    if (begin_ll < 0 || end_ll <= begin_ll) {
+      CCTK_VERROR(
+          "Invalid offsets [%lld, %lld] for box %llu in group '%s'",
+          static_cast<long long>(begin_ll), static_cast<long long>(end_ll),
+          static_cast<unsigned long long>(bi), group_name.c_str());
+    }
+
+    box_offsets[bi] = {{static_cast<std::size_t>(begin_ll),
+                        static_cast<std::size_t>(end_ll)}};
+  }
+
+  return box_offsets;
+}
+
 inline int clamp_int(const int v, const int lo, const int hi) {
   return std::max(lo, std::min(v, hi));
 }
@@ -304,6 +337,11 @@ bool GRTresnaReader::point_in_box(const SourceBox &box, const int i, const int j
 const GRTresnaReader::SourceBox *
 GRTresnaReader::find_box_containing(const SourceLevel &level, const int i,
                                     const int j, const int k) const {
+  if (i < level.lo_union[0] || i > level.hi_union[0] || j < level.lo_union[1] ||
+      j > level.hi_union[1] || k < level.lo_union[2] ||
+      k > level.hi_union[2]) {
+    return nullptr;
+  }
   for (const auto &box : level.boxes) {
     if (point_in_box(box, i, j, k)) {
       return &box;
@@ -538,40 +576,29 @@ void GRTresnaReader::load_file(const std::string &filename,
 
     const auto offsets =
         read_int64_dataset(level_group, {"data:offsets=0", "data:offsets"});
-    if (offsets.size() != boxes_raw.size() + 1) {
-      CCTK_VERROR(
-          "Expected %llu offsets for %llu boxes in group '%s', found %llu",
-          static_cast<unsigned long long>(boxes_raw.size() + 1),
-          static_cast<unsigned long long>(boxes_raw.size()), group_name.c_str(),
-          static_cast<unsigned long long>(offsets.size()));
-    }
+    const auto box_offsets =
+        decode_box_offsets(offsets, boxes_raw.size(), group_name);
 
-    const auto raw_data =
+    auto raw_data =
         read_real_dataset(level_group,
                           {"data:datatype=0", "data:datatype=1", "data"});
 
     level.boxes.reserve(boxes_raw.size());
     for (size_t bi = 0; bi < boxes_raw.size(); ++bi) {
-      const long long begin_ll = offsets[bi];
-      const long long end_ll = offsets[bi + 1];
-      if (begin_ll < 0 || end_ll <= begin_ll) {
-        CCTK_VERROR(
-            "Invalid offsets [%lld, %lld] for box %llu in group '%s'",
-            static_cast<long long>(begin_ll), static_cast<long long>(end_ll),
-            static_cast<unsigned long long>(bi), group_name.c_str());
-      }
-      if (static_cast<size_t>(end_ll) > raw_data.size()) {
+      const std::size_t begin = box_offsets[bi][0];
+      const std::size_t end = box_offsets[bi][1];
+      if (end > raw_data.size()) {
         CCTK_VERROR(
             "Source data too short in group '%s': end=%llu data_size=%llu",
-            group_name.c_str(), static_cast<unsigned long long>(end_ll),
+            group_name.c_str(), static_cast<unsigned long long>(end),
             static_cast<unsigned long long>(raw_data.size()));
       }
 
       SourceBox box;
       box.lo = {{boxes_raw[bi][0], boxes_raw[bi][1], boxes_raw[bi][2]}};
       box.hi = {{boxes_raw[bi][3], boxes_raw[bi][4], boxes_raw[bi][5]}};
-      box.begin = static_cast<size_t>(begin_ll);
-      box.end = static_cast<size_t>(end_ll);
+      box.begin = begin;
+      box.end = end;
 
       const int nx = box.hi[0] - box.lo[0] + 1;
       const int ny = box.hi[1] - box.lo[1] + 1;
@@ -623,7 +650,7 @@ void GRTresnaReader::load_file(const std::string &filename,
       level.boxes.push_back(box);
     }
 
-    level.data = raw_data;
+    level.data = std::move(raw_data);
     levels_.push_back(level);
 
     if (H5Gclose(level_group) < 0) {
@@ -890,89 +917,111 @@ double GRTresnaReader::sample_component(const int comp, const double x,
 bool GRTresnaReader::sample_adm(const double x, const double y, const double z,
                                 const InterpolationMethod method,
                                 const OutOfBoundsPolicy oob_policy,
-                                ADMSample &out) const {
+                                ADMSample &out,
+                                const bool need_metric_curv,
+                                const bool need_lapse,
+                                const bool need_shift) const {
   bool ok = true;
 
+  if (!(need_metric_curv || need_lapse || need_shift)) {
+    return true;
+  }
+
   if (basis_ == VariableBasis::adm) {
-    out.gxx = sample_component(idx_gxx_, x, y, z, method, oob_policy, ok);
-    out.gxy = sample_component(idx_gxy_, x, y, z, method, oob_policy, ok);
-    out.gxz = sample_component(idx_gxz_, x, y, z, method, oob_policy, ok);
-    out.gyy = sample_component(idx_gyy_, x, y, z, method, oob_policy, ok);
-    out.gyz = sample_component(idx_gyz_, x, y, z, method, oob_policy, ok);
-    out.gzz = sample_component(idx_gzz_, x, y, z, method, oob_policy, ok);
+    if (need_metric_curv) {
+      out.gxx = sample_component(idx_gxx_, x, y, z, method, oob_policy, ok);
+      out.gxy = sample_component(idx_gxy_, x, y, z, method, oob_policy, ok);
+      out.gxz = sample_component(idx_gxz_, x, y, z, method, oob_policy, ok);
+      out.gyy = sample_component(idx_gyy_, x, y, z, method, oob_policy, ok);
+      out.gyz = sample_component(idx_gyz_, x, y, z, method, oob_policy, ok);
+      out.gzz = sample_component(idx_gzz_, x, y, z, method, oob_policy, ok);
 
-    out.kxx = sample_component(idx_kxx_, x, y, z, method, oob_policy, ok);
-    out.kxy = sample_component(idx_kxy_, x, y, z, method, oob_policy, ok);
-    out.kxz = sample_component(idx_kxz_, x, y, z, method, oob_policy, ok);
-    out.kyy = sample_component(idx_kyy_, x, y, z, method, oob_policy, ok);
-    out.kyz = sample_component(idx_kyz_, x, y, z, method, oob_policy, ok);
-    out.kzz = sample_component(idx_kzz_, x, y, z, method, oob_policy, ok);
+      out.kxx = sample_component(idx_kxx_, x, y, z, method, oob_policy, ok);
+      out.kxy = sample_component(idx_kxy_, x, y, z, method, oob_policy, ok);
+      out.kxz = sample_component(idx_kxz_, x, y, z, method, oob_policy, ok);
+      out.kyy = sample_component(idx_kyy_, x, y, z, method, oob_policy, ok);
+      out.kyz = sample_component(idx_kyz_, x, y, z, method, oob_policy, ok);
+      out.kzz = sample_component(idx_kzz_, x, y, z, method, oob_policy, ok);
+    }
 
-    out.alp = sample_component(idx_alp_, x, y, z, method, oob_policy, ok);
-    out.betax = sample_component(idx_betax_, x, y, z, method, oob_policy, ok);
-    out.betay = sample_component(idx_betay_, x, y, z, method, oob_policy, ok);
-    out.betaz = sample_component(idx_betaz_, x, y, z, method, oob_policy, ok);
+    if (need_lapse) {
+      out.alp = sample_component(idx_alp_, x, y, z, method, oob_policy, ok);
+    }
+    if (need_shift) {
+      out.betax = sample_component(idx_betax_, x, y, z, method, oob_policy, ok);
+      out.betay = sample_component(idx_betay_, x, y, z, method, oob_policy, ok);
+      out.betaz = sample_component(idx_betaz_, x, y, z, method, oob_policy, ok);
+    }
     return ok;
   }
 
-  const double chi_raw =
-      sample_component(idx_chi_, x, y, z, method, oob_policy, ok);
-  const double h11 =
-      sample_component(idx_h11_, x, y, z, method, oob_policy, ok);
-  const double h12 =
-      sample_component(idx_h12_, x, y, z, method, oob_policy, ok);
-  const double h13 =
-      sample_component(idx_h13_, x, y, z, method, oob_policy, ok);
-  const double h22 =
-      sample_component(idx_h22_, x, y, z, method, oob_policy, ok);
-  const double h23 =
-      sample_component(idx_h23_, x, y, z, method, oob_policy, ok);
-  const double h33 =
-      sample_component(idx_h33_, x, y, z, method, oob_policy, ok);
-
-  const double ktrace =
-      sample_component(idx_ktrace_, x, y, z, method, oob_policy, ok);
-  const double A11 =
-      sample_component(idx_A11_, x, y, z, method, oob_policy, ok);
-  const double A12 =
-      sample_component(idx_A12_, x, y, z, method, oob_policy, ok);
-  const double A13 =
-      sample_component(idx_A13_, x, y, z, method, oob_policy, ok);
-  const double A22 =
-      sample_component(idx_A22_, x, y, z, method, oob_policy, ok);
-  const double A23 =
-      sample_component(idx_A23_, x, y, z, method, oob_policy, ok);
-  const double A33 =
-      sample_component(idx_A33_, x, y, z, method, oob_policy, ok);
-
-  out.alp = sample_component(idx_lapse_, x, y, z, method, oob_policy, ok);
-  out.betax = sample_component(idx_shift1_, x, y, z, method, oob_policy, ok);
-  out.betay = sample_component(idx_shift2_, x, y, z, method, oob_policy, ok);
-  out.betaz = sample_component(idx_shift3_, x, y, z, method, oob_policy, ok);
+  if (need_lapse) {
+    out.alp = sample_component(idx_lapse_, x, y, z, method, oob_policy, ok);
+  }
+  if (need_shift) {
+    out.betax = sample_component(idx_shift1_, x, y, z, method, oob_policy, ok);
+    out.betay = sample_component(idx_shift2_, x, y, z, method, oob_policy, ok);
+    out.betaz = sample_component(idx_shift3_, x, y, z, method, oob_policy, ok);
+  }
   if (!ok) {
     return false;
   }
 
-  const double chi = std::max(chi_raw, config_.chi_floor);
-  if (!(std::isfinite(chi) && chi > 0.0)) {
-    return false;
+  if (need_metric_curv) {
+    const double chi_raw =
+        sample_component(idx_chi_, x, y, z, method, oob_policy, ok);
+    const double h11 =
+        sample_component(idx_h11_, x, y, z, method, oob_policy, ok);
+    const double h12 =
+        sample_component(idx_h12_, x, y, z, method, oob_policy, ok);
+    const double h13 =
+        sample_component(idx_h13_, x, y, z, method, oob_policy, ok);
+    const double h22 =
+        sample_component(idx_h22_, x, y, z, method, oob_policy, ok);
+    const double h23 =
+        sample_component(idx_h23_, x, y, z, method, oob_policy, ok);
+    const double h33 =
+        sample_component(idx_h33_, x, y, z, method, oob_policy, ok);
+
+    const double ktrace =
+        sample_component(idx_ktrace_, x, y, z, method, oob_policy, ok);
+    const double A11 =
+        sample_component(idx_A11_, x, y, z, method, oob_policy, ok);
+    const double A12 =
+        sample_component(idx_A12_, x, y, z, method, oob_policy, ok);
+    const double A13 =
+        sample_component(idx_A13_, x, y, z, method, oob_policy, ok);
+    const double A22 =
+        sample_component(idx_A22_, x, y, z, method, oob_policy, ok);
+    const double A23 =
+        sample_component(idx_A23_, x, y, z, method, oob_policy, ok);
+    const double A33 =
+        sample_component(idx_A33_, x, y, z, method, oob_policy, ok);
+    if (!ok) {
+      return false;
+    }
+
+    const double chi = std::max(chi_raw, config_.chi_floor);
+    if (!(std::isfinite(chi) && chi > 0.0)) {
+      return false;
+    }
+
+    const double inv_chi = 1.0 / chi;
+    out.gxx = h11 * inv_chi;
+    out.gxy = h12 * inv_chi;
+    out.gxz = h13 * inv_chi;
+    out.gyy = h22 * inv_chi;
+    out.gyz = h23 * inv_chi;
+    out.gzz = h33 * inv_chi;
+
+    const double one_third_k = ktrace / 3.0;
+    out.kxx = (A11 + one_third_k * h11) * inv_chi;
+    out.kxy = (A12 + one_third_k * h12) * inv_chi;
+    out.kxz = (A13 + one_third_k * h13) * inv_chi;
+    out.kyy = (A22 + one_third_k * h22) * inv_chi;
+    out.kyz = (A23 + one_third_k * h23) * inv_chi;
+    out.kzz = (A33 + one_third_k * h33) * inv_chi;
   }
-
-  const double inv_chi = 1.0 / chi;
-  out.gxx = h11 * inv_chi;
-  out.gxy = h12 * inv_chi;
-  out.gxz = h13 * inv_chi;
-  out.gyy = h22 * inv_chi;
-  out.gyz = h23 * inv_chi;
-  out.gzz = h33 * inv_chi;
-
-  const double one_third_k = ktrace / 3.0;
-  out.kxx = (A11 + one_third_k * h11) * inv_chi;
-  out.kxy = (A12 + one_third_k * h12) * inv_chi;
-  out.kxz = (A13 + one_third_k * h13) * inv_chi;
-  out.kyy = (A22 + one_third_k * h22) * inv_chi;
-  out.kyz = (A23 + one_third_k * h23) * inv_chi;
-  out.kzz = (A33 + one_third_k * h33) * inv_chi;
 
   return true;
 }
