@@ -1,0 +1,20 @@
+if (CCTK_Equals(initial_data,  "GRTresnaIDX") ||
+    CCTK_Equals(initial_lapse, "GRTresnaIDX") ||
+    CCTK_Equals(initial_shift, "GRTresnaIDX"))
+{
+  SCHEDULE GRTresnaIDX_ParamCheck AT CCTK_PARAMCHECK
+  {
+    LANG: C
+    OPTIONS: GLOBAL
+  } "Validate GRTresnaIDX runtime parameters"
+
+  SCHEDULE GRTresnaIDX_InitialData IN ADMBaseX_InitialData
+  {
+    LANG: C
+    READS: CoordinatesX::vertex_coords(everywhere)
+    WRITES: ADMBaseX::metric(everywhere)
+    WRITES: ADMBaseX::curv(everywhere)
+    WRITES: ADMBaseX::lapse(everywhere)
+    WRITES: ADMBaseX::shift(everywhere)
+  } "Read GRTresna data and populate ADMBaseX fields"
+}

@@ -1,0 +1,7 @@
+# Interface definition for thorn GRTresnaIDX
+
+IMPLEMENTS: GRTresnaIDX
+
+INHERITS: ADMBaseX CoordinatesX
+
+USES INCLUDE HEADER: loop.hxx

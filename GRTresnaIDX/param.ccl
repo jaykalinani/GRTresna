@@ -1,0 +1,68 @@
+SHARES: ADMBaseX
+
+EXTENDS KEYWORD initial_data
+{
+  "GRTresnaIDX" :: "Read spacetime initial data from GRTresna output"
+}
+
+EXTENDS KEYWORD initial_lapse
+{
+  "GRTresnaIDX" :: "Read lapse from GRTresna output"
+}
+
+EXTENDS KEYWORD initial_shift
+{
+  "GRTresnaIDX" :: "Read shift from GRTresna output"
+}
+
+PRIVATE:
+
+STRING grtresna_filename "Path to GRTresna output HDF5 file"
+{
+  ".*" :: "Any filename, potentially with path"
+} ""
+
+KEYWORD grtresna_format "Input format"
+{
+  "auto"          :: "Autodetect from metadata and datasets"
+  "grtresna_hdf5" :: "GRTresna HDF5 output format"
+} "auto"
+
+KEYWORD interpolation "Sampling method from source cells to CarpetX vertices"
+{
+  "nearest"   :: "Nearest-neighbor sampling"
+  "trilinear" :: "Trilinear interpolation (default)"
+} "trilinear"
+
+KEYWORD out_of_bounds "Behavior when a CarpetX point is outside the source domain"
+{
+  "clamp" :: "Clamp to nearest valid source cell"
+  "error" :: "Abort run with an actionable error message"
+} "clamp"
+
+BOOLEAN read_matter "Read matter fields when available (spacetime setup remains independent)"
+{
+} "no"
+
+BOOLEAN sanity_checks "Print rank-0 min/max sanity checks after setup"
+{
+} "yes"
+
+BOOLEAN use_source_center "Use source_center[] instead of auto-centering from source index extents"
+{
+} "no"
+
+CCTK_REAL source_center[3] "Coordinates subtracted in source mapping x=(i+0.5)*dx-center"
+{
+  (*:*) :: "Any real values"
+} 0.0
+
+CCTK_REAL chi_floor "Lower bound for chi when converting BSSN-like fields to ADM"
+{
+  (0:*) :: "Strictly positive"
+} 1.0e-14
+
+INT verbosity "Verbosity level"
+{
+  0:* :: "0=silent, 1=summary, 2=debug"
+} 1
