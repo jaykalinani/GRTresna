@@ -2,6 +2,16 @@
 
 IMPLEMENTS: GRTresnaIDX
 
-INHERITS: ADMBaseX CoordinatesX
+INHERITS: ADMBaseX CoordinatesX CarpetXRegrid
 
 USES INCLUDE HEADER: loop.hxx
+
+PRIVATE:
+
+CCTK_REAL metric_cell TYPE=gf CENTERING={ccc} TAGS='checkpoint="no"' { gxx_cell gxy_cell gxz_cell gyy_cell gyz_cell gzz_cell } "Cell-centered ADM 3-metric sampled from GRTresna data"
+
+CCTK_REAL curv_cell TYPE=gf CENTERING={ccc} TAGS='checkpoint="no"' { kxx_cell kxy_cell kxz_cell kyy_cell kyz_cell kzz_cell } "Cell-centered ADM extrinsic curvature sampled from GRTresna data"
+
+CCTK_REAL lapse_cell TYPE=gf CENTERING={ccc} TAGS='checkpoint="no"' { alp_cell } "Cell-centered ADM lapse sampled from GRTresna data"
+
+CCTK_REAL shift_cell TYPE=gf CENTERING={ccc} TAGS='checkpoint="no"' { betax_cell betay_cell betaz_cell } "Cell-centered ADM shift sampled from GRTresna data"

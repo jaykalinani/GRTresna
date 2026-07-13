@@ -31,22 +31,45 @@ KEYWORD grtresna_format "Input format"
 KEYWORD interpolation "Sampling method from source cells to CarpetX vertices"
 {
   "nearest"   :: "Nearest-neighbor sampling"
-  "trilinear" :: "Trilinear interpolation (default)"
-} "trilinear"
+  "trilinear" :: "Trilinear interpolation"
+} "nearest"
+
+KEYWORD adm_population_method "How to populate ADMBaseX vertex-centered fields"
+{
+  "direct"            :: "Sample source data directly at ADMBaseX vertices"
+  "cell-centered-c2v" :: "Sample source data at CarpetX cell centers, convert to ADM there, then interpolate cell-centered ADM fields to vertices"
+} "cell-centered-c2v"
+
+INT c2v_order "Cell-centered to vertex-centered interpolation order for adm_population_method=cell-centered-c2v"
+{
+  2 :: "Second-order eight-cell average"
+  4 :: "Fourth-order symmetrized cell-centered to vertex-centered interpolation"
+} 2
 
 KEYWORD out_of_bounds "Behavior when a CarpetX point is outside the source domain"
 {
-  "clamp" :: "Clamp to nearest valid source cell"
-  "error" :: "Abort run with an actionable error message"
+  "clamp"   :: "Clamp to nearest valid source cell"
+  "error"   :: "Abort run with an actionable error message"
 } "clamp"
 
-BOOLEAN read_matter "Read matter fields when available (spacetime setup remains independent)"
+KEYWORD lapse_profile "How to initialize lapse when ADMBaseX::initial_lapse is GRTresnaIDX"
 {
-} "no"
+  "file"            :: "Use the lapse stored in the source file"
+  "determinant-psi" :: "Use alpha=det(g)^(-1/12), a puncture-style pre-collapsed lapse estimate"
+} "file"
 
 BOOLEAN sanity_checks "Print rank-0 min/max sanity checks after setup"
 {
 } "yes"
+
+BOOLEAN set_source_regrid_error "Populate CarpetXRegrid::regrid_error from the source HDF5 AMR boxes"
+{
+} "no"
+
+INT extra_coarse_levels "Number of CarpetX levels coarser than source level 0 when mapping source AMR boxes"
+{
+  0:* :: "0 means CarpetX level 0 matches source level 0"
+} 0
 
 BOOLEAN use_source_center "Use source_center[] instead of auto-centering from source index extents"
 {

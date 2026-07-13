@@ -1,3 +1,5 @@
+STORAGE: metric_cell curv_cell lapse_cell shift_cell
+
 if (CCTK_Equals(initial_data,  "GRTresnaIDX") ||
     CCTK_Equals(initial_lapse, "GRTresnaIDX") ||
     CCTK_Equals(initial_shift, "GRTresnaIDX"))
@@ -8,13 +10,54 @@ if (CCTK_Equals(initial_data,  "GRTresnaIDX") ||
     OPTIONS: GLOBAL
   } "Validate GRTresnaIDX runtime parameters"
 
-  SCHEDULE GRTresnaIDX_InitialData IN ADMBaseX_InitialData
+  if (CCTK_Equals(adm_population_method, "cell-centered-c2v"))
   {
-    LANG: C
-    READS: CoordinatesX::vertex_coords(everywhere)
-    WRITES: ADMBaseX::metric(everywhere)
-    WRITES: ADMBaseX::curv(everywhere)
-    WRITES: ADMBaseX::lapse(everywhere)
-    WRITES: ADMBaseX::shift(everywhere)
-  } "Read GRTresna data and populate ADMBaseX fields"
+    SCHEDULE GRTresnaIDX_InitialDataCell IN ADMBaseX_InitialData
+    {
+      LANG: C
+      READS: CoordinatesX::cell_coords(everywhere)
+      WRITES: metric_cell(everywhere)
+      WRITES: curv_cell(everywhere)
+      WRITES: lapse_cell(everywhere)
+      WRITES: shift_cell(everywhere)
+      SYNC: metric_cell curv_cell lapse_cell shift_cell
+    } "Read GRTresna data and populate cell-centered ADM fields"
+
+    SCHEDULE GRTresnaIDX_InitialDataC2V IN ADMBaseX_InitialData AFTER GRTresnaIDX_InitialDataCell
+    {
+      LANG: C
+      READS: metric_cell(everywhere)
+      READS: curv_cell(everywhere)
+      READS: lapse_cell(everywhere)
+      READS: shift_cell(everywhere)
+      WRITES: ADMBaseX::metric(interior)
+      WRITES: ADMBaseX::curv(interior)
+      WRITES: ADMBaseX::lapse(interior)
+      WRITES: ADMBaseX::shift(interior)
+      SYNC: ADMBaseX::metric ADMBaseX::curv ADMBaseX::lapse ADMBaseX::shift
+    } "Interpolate cell-centered GRTresna ADM data to ADMBaseX vertices"
+  }
+  else
+  {
+    SCHEDULE GRTresnaIDX_InitialData IN ADMBaseX_InitialData
+    {
+      LANG: C
+      READS: CoordinatesX::vertex_coords(everywhere)
+      WRITES: ADMBaseX::metric(everywhere)
+      WRITES: ADMBaseX::curv(everywhere)
+      WRITES: ADMBaseX::lapse(everywhere)
+      WRITES: ADMBaseX::shift(everywhere)
+      SYNC: ADMBaseX::metric ADMBaseX::curv ADMBaseX::lapse ADMBaseX::shift
+    } "Read GRTresna data and populate ADMBaseX fields directly at vertices"
+  }
+
+  if (CCTK_IsThornActive("CarpetXRegrid") && set_source_regrid_error)
+  {
+    SCHEDULE GRTresnaIDX_SourceRegridError AS EstimateError AT postinitial AFTER ODESolvers_EstimateError
+    {
+      LANG: C
+      READS: CoordinatesX::cell_coords(everywhere)
+      WRITES: CarpetXRegrid::regrid_error(everywhere)
+    } "Populate CarpetXRegrid::regrid_error from the source HDF5 AMR boxes"
+  }
 }
