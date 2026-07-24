@@ -1,147 +1,639 @@
-# run.me:
-# run.cores: 4
-# run.memory: 1.0e9
-# run.time: 60.0
-#
-# Direct-reader four-BH setup using precomputed GRTresna data.
-# This uses GRTresnaIDX to sample the GRTresna/Chombo AMR HDF5 file and
-# populate ADMBaseX. It does not solve the constraints on the fly.
-#
-# The source file is a four-level Chombo AMR hierarchy with base dx=0.625
-# over [-40,40]^3. CarpetX is configured here with the same base domain,
-# but only two CarpetX levels for this ID-matched comparison run.
-# GRTresnaIDX tags CarpetX cells covered by the next-finer source HDF5 boxes
-# so the initial CarpetX regrid loop creates a comparable coarse/fine grid,
-# then samples from the finest source level containing each query point.
+# AsterX GRTresnaIDX four-BH cloud
 
+# -----------------------------------------------------------------------------
+# Active thorns
+# -----------------------------------------------------------------------------
 ActiveThorns = "
-    ADMBaseX
-    CarpetX
-    CarpetXRegrid
-    CoordinatesX
-    Formaline
-    GRTresnaIDX
-    IOUtil
-    ODESolvers
+ADMBaseX
+AEILocalInterp
+AHFinderDirect
+BoxInBox
+CarpetX
+CarpetXRegrid
+CoordinatesX
+Formaline
+GRTresnaIDX
+IOUtil
+Multipole
+ODESolvers
+PunctureTracker
+QuasiLocalMeasures
+SphericalSurface
+Subcycling
+TmunuBaseX
+VolumeIntegrals_vacuumX
+WeylScal4
+Z4c
 "
 
-Cactus::cctk_show_schedule = no
-Cactus::presync_mode = "mixed-error"
-Cactus::cctk_itlast = 0
+# Diagnostic thorns used by this 4-BH run:
+#   - QuasiLocalMeasures: isolated-horizon masses, spins, and surface momenta.
+#   - VolumeIntegrals_vacuumX: constraint L2 norms and ADM global invariants.
 
-ODESolvers::method = "constant"
+# -----------------------------------------------------------------------------
+# Global variables
+# -----------------------------------------------------------------------------
+$itlast = 256
+#$final_time = 1000
+# GRChombo source grid: L_full=512, N_full=64, max_level=9.
+$xmin = -256.0
+$xmax = +256.0
+$ncells = 64
+$nlevels = 10
+$error_threshold = 0.5
+$dtfac = 0.3
+$ahfind_start_time = 0.0
+$out_every = 512
 
-CarpetX::verbose = no
-CarpetX::poison_undefined_values = yes
+$bh1_x = -6.0
+$bh1_y = -6.0
+$bh1_z =  0.0
+$bh2_x = -6.0
+$bh2_y =  6.0
+$bh2_z =  0.0
+$bh3_x =  6.0
+$bh3_y = -6.0
+$bh3_z =  0.0
+$bh4_x =  6.0
+$bh4_y =  6.0
+$bh4_z =  0.0
 
-CarpetX::xmin = -40.0
-CarpetX::ymin = -40.0
-CarpetX::zmin = -40.0
-CarpetX::xmax = +40.0
-CarpetX::ymax = +40.0
-CarpetX::zmax = +40.0
+$bh1_m = 0.5
+$bh2_m = 0.5
+$bh3_m = 0.5
+$bh4_m = 0.5
 
-CarpetX::ncells_x = 128
-CarpetX::ncells_y = 128
-CarpetX::ncells_z = 128
+# Position-dependent Gamma-driver eta, matching the GRChombo source params:
+# eta = 0.5, eta_C = 1.0, eta_w = 0.1, eta_n = 1.
+$eta_far = 0.5
+$eta_profile_coefficient = 1.0
+$eta_profile_weight = 0.1
+$eta_profile_power = 1
+$puncture_tracking_level = 5
 
-CarpetX::periodic_x = no
-CarpetX::periodic_y = no
-CarpetX::periodic_z = no
+# =============================================================================
+# Grid
+# =============================================================================
 
-CarpetX::boundary_x = "neumann"
-CarpetX::boundary_y = "neumann"
-CarpetX::boundary_z = "neumann"
-CarpetX::boundary_upper_x = "neumann"
-CarpetX::boundary_upper_y = "neumann"
-CarpetX::boundary_upper_z = "neumann"
+# -----------------------------------------------------------------------------
+# CarpetX
+# -----------------------------------------------------------------------------
+CarpetX::xmin = $xmin
+CarpetX::ymin = $xmin
+CarpetX::zmin = $xmin
 
-CarpetX::ghost_size = 3
+CarpetX::xmax = $xmax
+CarpetX::ymax = $xmax
+CarpetX::zmax = $xmax
+
+CarpetX::ncells_x = $ncells
+CarpetX::ncells_y = $ncells
+CarpetX::ncells_z = $ncells
 
 CarpetX::max_tile_size_x = 1024000
 CarpetX::max_tile_size_y = 1024000
 CarpetX::max_tile_size_z = 1024000
 
-# Match the saved InitialConditionSolver_BHCluster quartet ID:
-# L=80, N=128^3, max_level=3, refine_threshold=0.5,
-# fill_ratio=0.7. Keep CarpetX blocking_factor=1 and choose
-# max_grid_size for 8 GPUs: 128^3 -> 2 x 2 x 2 = 8 base boxes.
 CarpetX::blocking_factor_x = 1
 CarpetX::blocking_factor_y = 1
 CarpetX::blocking_factor_z = 1
-CarpetX::max_grid_size_x = 64
-CarpetX::max_grid_size_y = 64
-CarpetX::max_grid_size_z = 64
-CarpetX::max_num_levels = 4
-CarpetX::regrid_every = 1
-CarpetX::regrid_error_threshold = 0.5
 
+CarpetX::max_grid_size_x = 32
+CarpetX::max_grid_size_y = 32
+CarpetX::max_grid_size_z = 32
+
+# Per-level max grid sizes tuned for 8 MPI ranks / GPUs. Level 0 and the
+# full-domain level 1 split into 2x2x2 boxes; inner disjoint puncture levels
+# keep one x/y box per puncture and split once in z where needed.
+CarpetX::max_grid_sizes_x = [ 32, 64, 64, 48, 64, 72, 96, 96, 96, 96 ]
+CarpetX::max_grid_sizes_y = [ 32, 64, 64, 48, 64, 72, 96, 96, 96, 96 ]
+CarpetX::max_grid_sizes_z = [ 32, 64, 64, 48, 48, 48, 48, 48, 48, 48 ]
+
+CarpetX::boundary_x = "robin"
+CarpetX::boundary_y = "robin"
+CarpetX::boundary_z = "robin"
+CarpetX::boundary_upper_x = "robin"
+CarpetX::boundary_upper_y = "robin"
+CarpetX::boundary_upper_z = "robin"
+
+CarpetX::ghost_size = 3
+
+CarpetX::max_num_levels = $nlevels
+CarpetX::regrid_every = 256 #2 ** ($nlevels - 1)
+CarpetX::regrid_error_threshold = $error_threshold
+CarpetX::grid_efficiency = 0.7
+
+CarpetX::refine_grid_layout = no
+
+CarpetX::prolongation_type = "poly-cons3lfb"
+CarpetX::prolongation_order = 5
+CarpetX::prolongate_per_group = yes
+CarpetX::interpolation_order = 3
+
+# The HDF5 source has dx0=8 on [-256,256]^3 with 64^3 coarse cells
+# and 10 AMR levels. Use all source levels one-to-one: level 1 is kept
+# full-domain, then the per-puncture radii mirror the GRChombo hierarchy.
+
+# -----------------------------------------------------------------------------
+# BoxInBox / PunctureTracker
+# -----------------------------------------------------------------------------
+BoxInBox::num_regions = 4
+
+BoxInBox::shape_1 = "cube"
+BoxInBox::num_levels_1 = $nlevels
+BoxInBox::position_x_1 = $bh1_x
+BoxInBox::position_y_1 = $bh1_y
+BoxInBox::position_z_1 = $bh1_z
+BoxInBox::radius_1 = [-1.0, 192.0, 96.0, 42.0, 24.0, 12.0, 6.0, 3.0, 1.5, 0.75]
+
+BoxInBox::shape_2 = "cube"
+BoxInBox::num_levels_2 = $nlevels
+BoxInBox::position_x_2 = $bh2_x
+BoxInBox::position_y_2 = $bh2_y
+BoxInBox::position_z_2 = $bh2_z
+BoxInBox::radius_2 = [-1.0, 192.0, 96.0, 42.0, 24.0, 12.0, 6.0, 3.0, 1.5, 0.75]
+
+BoxInBox::shape_3 = "cube"
+BoxInBox::num_levels_3 = $nlevels
+BoxInBox::position_x_3 = $bh3_x
+BoxInBox::position_y_3 = $bh3_y
+BoxInBox::position_z_3 = $bh3_z
+BoxInBox::radius_3 = [-1.0, 192.0, 96.0, 42.0, 24.0, 12.0, 6.0, 3.0, 1.5, 0.75]
+
+BoxInBox::shape_4 = "cube"
+BoxInBox::num_levels_4 = $nlevels
+BoxInBox::position_x_4 = $bh4_x
+BoxInBox::position_y_4 = $bh4_y
+BoxInBox::position_z_4 = $bh4_z
+BoxInBox::radius_4 = [-1.0, 192.0, 96.0, 42.0, 24.0, 12.0, 6.0, 3.0, 1.5, 0.75]
+
+PunctureTracker::verbose = yes
+PunctureTracker::track_boxes = yes
+PunctureTracker::interp_order = 3
+PunctureTracker::interp_level_mode = "max_level"
+PunctureTracker::interp_max_level = $puncture_tracking_level
+PunctureTracker::tracking_level_mode = "level"
+PunctureTracker::tracking_level = $puncture_tracking_level
+PunctureTracker::tracking_finest_level = 9
+PunctureTracker::time_integrator = "trapezoidal"
+PunctureTracker::track_mergers = yes
+PunctureTracker::merger_distance_coefficient = 0.5
+
+PunctureTracker::track[0] = yes
+PunctureTracker::initial_x[0] = $bh1_x
+PunctureTracker::initial_y[0] = $bh1_y
+PunctureTracker::initial_z[0] = $bh1_z
+PunctureTracker::puncture_mass[0] = $bh1_m
+PunctureTracker::puncture_eta_weight[0] = $eta_profile_weight
+
+PunctureTracker::track[1] = yes
+PunctureTracker::initial_x[1] = $bh2_x
+PunctureTracker::initial_y[1] = $bh2_y
+PunctureTracker::initial_z[1] = $bh2_z
+PunctureTracker::puncture_mass[1] = $bh2_m
+PunctureTracker::puncture_eta_weight[1] = $eta_profile_weight
+
+PunctureTracker::track[2] = yes
+PunctureTracker::initial_x[2] = $bh3_x
+PunctureTracker::initial_y[2] = $bh3_y
+PunctureTracker::initial_z[2] = $bh3_z
+PunctureTracker::puncture_mass[2] = $bh3_m
+PunctureTracker::puncture_eta_weight[2] = $eta_profile_weight
+
+PunctureTracker::track[3] = yes
+PunctureTracker::initial_x[3] = $bh4_x
+PunctureTracker::initial_y[3] = $bh4_y
+PunctureTracker::initial_z[3] = $bh4_z
+PunctureTracker::puncture_mass[3] = $bh4_m
+PunctureTracker::puncture_eta_weight[3] = $eta_profile_weight
+
+# =============================================================================
+# Time integration
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Cactus
+# -----------------------------------------------------------------------------
+Cactus::cctk_show_schedule = yes
+Cactus::presync_mode = "mixed-error"
+Cactus::terminate = "never"
+#Cactus::cctk_itlast = $itlast
+#Cactus::cctk_final_time = $final_time
+
+# -----------------------------------------------------------------------------
+# CarpetX
+# -----------------------------------------------------------------------------
+CarpetX::verbose = no
+CarpetX::poison_undefined_values = no
+CarpetX::poison_undefined_arrays = no
+CarpetX::use_subcycling = yes
+CarpetX::restrict_during_sync = no
+CarpetX::dtfac = $dtfac
+
+# -----------------------------------------------------------------------------
+# ODESolvers
+# -----------------------------------------------------------------------------
+ODESolvers::verbose = no
+ODESolvers::method = "RK4" #"RK4"
+
+# =============================================================================
+# Initial data
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# ADMBaseX
+# -----------------------------------------------------------------------------
 ADMBaseX::initial_data = "GRTresnaIDX"
 ADMBaseX::initial_lapse = "GRTresnaIDX"
 ADMBaseX::initial_shift = "GRTresnaIDX"
 ADMBaseX::initial_dtlapse = "zero"
 ADMBaseX::initial_dtshift = "zero"
 
-GRTresnaIDX::grtresna_filename = "/work/hdd/bgmi/jkalinan/ID_BHClusterX/InitialConditionsFinal_BH_quartet.3d.hdf5"
+# -----------------------------------------------------------------------------
+# GRTresnaIDX
+# -----------------------------------------------------------------------------
+#GRTresnaIDX::grtresna_filename = "/work/hdd/bgmi/jkalinan/ID_BHClusterX/InitialConditionsFinal_BH_quartet.3d.hdf5"
+GRTresnaIDX::grtresna_filename = "/projects/bgmi/jbamber/BH_Cluster_IDs/BH_quartet_moving/hdf5/InitialConditionsFinal.3d.hdf5"
 GRTresnaIDX::grtresna_format = "grtresna_hdf5"
 GRTresnaIDX::adm_population_method = "cell-centered-c2v"
-GRTresnaIDX::c2v_order = 2
-GRTresnaIDX::interpolation = "nearest"
+GRTresnaIDX::c2v_order = 4
+GRTresnaIDX::interpolation = "trilinear"
 GRTresnaIDX::out_of_bounds = "clamp"
 GRTresnaIDX::lapse_profile = "file"
 GRTresnaIDX::sanity_checks = no
-GRTresnaIDX::set_source_regrid_error = yes
+GRTresnaIDX::set_source_regrid_error = no
 GRTresnaIDX::extra_coarse_levels = 0
 GRTresnaIDX::use_source_center = no
 GRTresnaIDX::chi_floor = 1.0e-14
 GRTresnaIDX::verbosity = 2
 
-IO::out_dir = $parfile
-IO::out_every = 1
-IO::out_mode = "np"
-IO::out_proc_every = 1
+# =============================================================================
+# Spacetime Evolution
+# =============================================================================
 
+# -----------------------------------------------------------------------------
+# Z4c
+# -----------------------------------------------------------------------------
+Z4c::kappa1 = 0.02
+Z4c::kappa2 = 0.0
+Z4c::f_mu_L = 2.0
+Z4c::f_mu_S = 0.75
+Z4c::eta = $eta_far
+Z4c::eta_profile = "puncture_tracker"
+Z4c::eta_reference_mass = -1.0
+Z4c::eta_profile_coefficient = $eta_profile_coefficient
+Z4c::eta_profile_power = $eta_profile_power
+Z4c::eta_profile_min = 0.0
+Z4c::eta_profile_max = 10.0
+Z4c::calc_ADM_vars = yes                  # for Weyl
+Z4c::calc_ADMRHS_vars = no
+Z4c::calc_constraints = yes
+Z4c::chi_floor = 1.0e-6
+Z4c::alphaG_floor = 1.0e-8
+Z4c::epsdiss = 0.32
+Z4c::veta_central = 0.5 # 1/M
+Z4c::boundary_conditions = "NewRadX"
+
+# =============================================================================
+# Analysis
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# AHFinderDirect
+# -----------------------------------------------------------------------------
+AHFinderDirect::N_horizons = 4
+AHFinderDirect::find_after_individual_time[1] = $ahfind_start_time
+AHFinderDirect::find_after_individual_time[2] = $ahfind_start_time
+AHFinderDirect::find_after_individual_time[3] = $ahfind_start_time
+AHFinderDirect::find_after_individual_time[4] = $ahfind_start_time
+AHFinderDirect::find_every = 4
+AHFinderDirect::output_h_every = 4
+AHFinderDirect::output_BH_diagnostics = yes
+AHFinderDirect::BH_diagnostics_directory = "$parfile/ahfinder"
+AHFinderDirect::BH_diagnostics_base_file_name = "BH_diagnostics"
+AHFinderDirect::BH_diagnostics_file_name_extension = "gp"
+AHFinderDirect::output_ASCII_files = yes
+AHFinderDirect::output_HDF5_files = no
+AHFinderDirect::output_Theta_every = 0
+AHFinderDirect::output_mean_curvature_every = 0
+AHFinderDirect::debugging_output_at_each_Newton_iteration = no
+AHFinderDirect::geometry_interpolator_name = "CarpetX"
+AHFinderDirect::geometry_interpolator_pars = "order=3"
+AHFinderDirect::surface_interpolator_name = "Lagrange polynomial interpolation"
+AHFinderDirect::surface_interpolator_pars = "order=3"
+AHFinderDirect::verbose_level = "algorithm details"
+AHFinderDirect::move_origins = yes
+
+AHFinderDirect::initial_guess_method[1] = "coordinate sphere"
+AHFinderDirect::origin_x[1] = $bh1_x
+AHFinderDirect::origin_y[1] = $bh1_y
+AHFinderDirect::origin_z[1] = $bh1_z
+AHFinderDirect::initial_guess__coord_sphere__x_center[1] = $bh1_x
+AHFinderDirect::initial_guess__coord_sphere__y_center[1] = $bh1_y
+AHFinderDirect::initial_guess__coord_sphere__z_center[1] = $bh1_z
+AHFinderDirect::initial_guess__coord_sphere__radius[1] = 0.25
+AHFinderDirect::which_surface_to_store_info[1] = 0
+AHFinderDirect::reset_horizon_after_not_finding[1] = no
+AHFinderDirect::patch_system_type[1] = "full sphere"
+
+AHFinderDirect::initial_guess_method[2] = "coordinate sphere"
+AHFinderDirect::origin_x[2] = $bh2_x
+AHFinderDirect::origin_y[2] = $bh2_y
+AHFinderDirect::origin_z[2] = $bh2_z
+AHFinderDirect::initial_guess__coord_sphere__x_center[2] = $bh2_x
+AHFinderDirect::initial_guess__coord_sphere__y_center[2] = $bh2_y
+AHFinderDirect::initial_guess__coord_sphere__z_center[2] = $bh2_z
+AHFinderDirect::initial_guess__coord_sphere__radius[2] = 0.25
+AHFinderDirect::which_surface_to_store_info[2] = 1
+AHFinderDirect::reset_horizon_after_not_finding[2] = no
+AHFinderDirect::patch_system_type[2] = "full sphere"
+
+AHFinderDirect::initial_guess_method[3] = "coordinate sphere"
+AHFinderDirect::origin_x[3] = $bh3_x
+AHFinderDirect::origin_y[3] = $bh3_y
+AHFinderDirect::origin_z[3] = $bh3_z
+AHFinderDirect::initial_guess__coord_sphere__x_center[3] = $bh3_x
+AHFinderDirect::initial_guess__coord_sphere__y_center[3] = $bh3_y
+AHFinderDirect::initial_guess__coord_sphere__z_center[3] = $bh3_z
+AHFinderDirect::initial_guess__coord_sphere__radius[3] = 0.25
+AHFinderDirect::which_surface_to_store_info[3] = 2
+AHFinderDirect::reset_horizon_after_not_finding[3] = no
+AHFinderDirect::patch_system_type[3] = "full sphere"
+
+AHFinderDirect::initial_guess_method[4] = "coordinate sphere"
+AHFinderDirect::origin_x[4] = $bh4_x
+AHFinderDirect::origin_y[4] = $bh4_y
+AHFinderDirect::origin_z[4] = $bh4_z
+AHFinderDirect::initial_guess__coord_sphere__x_center[4] = $bh4_x
+AHFinderDirect::initial_guess__coord_sphere__y_center[4] = $bh4_y
+AHFinderDirect::initial_guess__coord_sphere__z_center[4] = $bh4_z
+AHFinderDirect::initial_guess__coord_sphere__radius[4] = 0.25
+AHFinderDirect::which_surface_to_store_info[4] = 3
+AHFinderDirect::reset_horizon_after_not_finding[4] = no
+AHFinderDirect::patch_system_type[4] = "full sphere"
+
+# -----------------------------------------------------------------------------
+# Multipole
+# -----------------------------------------------------------------------------
+Multipole::out_every          = $out_every
+Multipole::l_max              = 4
+Multipole::interpolator_pars  = "order=3 boundary_off_centering_tolerance={0.0 0.0 0.0 0.0 0.0 0.0} boundary_extrapolation_tolerance={0.0 0.0 0.0 0.0 0.0 0.0}"
+Multipole::integration_method = "Simpson"
+Multipole::verbose   = no
+Multipole::nradii    = 8
+Multipole::radius[0] = 50
+Multipole::radius[1] = 80
+Multipole::radius[2] = 100
+Multipole::radius[3] = 120
+Multipole::radius[4] = 150
+Multipole::radius[5] = 180
+Multipole::radius[6] = 200
+Multipole::radius[7] = 250
+Multipole::ntheta = 120
+Multipole::nphi = 240
+Multipole::variables          = "
+  # CanudaX_NPScalars::psi4re{sw=-2 cmplx='CanudaX_NPScalars::psi4im' name='NP_Psi4'}
+  WeylScal4::Psi4r{sw=-2 cmplx='WeylScal4::Psi4i' name='Psi4'}
+"
+
+WeylScal4::fdOrder = 4
+WeylScal4::verbose = 0
+
+# -----------------------------------------------------------------------------
+# QuasiLocalMeasures
+# -----------------------------------------------------------------------------
+QuasiLocalMeasures::verbose = no
+QuasiLocalMeasures::interpolator = "CarpetX"
+QuasiLocalMeasures::interpolator_options = "order=3"
+QuasiLocalMeasures::calculate_every = $out_every
+QuasiLocalMeasures::num_surfaces = 9
+QuasiLocalMeasures::surface_index[0] = 0
+QuasiLocalMeasures::surface_index[1] = 1
+QuasiLocalMeasures::surface_index[2] = 2
+QuasiLocalMeasures::surface_index[3] = 3
+QuasiLocalMeasures::surface_index[4] = 4
+QuasiLocalMeasures::surface_index[5] = 5
+QuasiLocalMeasures::surface_index[6] = 6
+QuasiLocalMeasures::surface_index[7] = 7
+QuasiLocalMeasures::surface_index[8] = 8
+QuasiLocalMeasures::spatial_order = 4
+QuasiLocalMeasures::begin_qlm_calculations_after[0] = $ahfind_start_time
+QuasiLocalMeasures::begin_qlm_calculations_after[1] = $ahfind_start_time
+QuasiLocalMeasures::begin_qlm_calculations_after[2] = $ahfind_start_time
+QuasiLocalMeasures::begin_qlm_calculations_after[3] = $ahfind_start_time
+QuasiLocalMeasures::begin_qlm_calculations_after[4] = 0.0
+QuasiLocalMeasures::begin_qlm_calculations_after[5] = 0.0
+QuasiLocalMeasures::begin_qlm_calculations_after[6] = 0.0
+QuasiLocalMeasures::begin_qlm_calculations_after[7] = 0.0
+QuasiLocalMeasures::begin_qlm_calculations_after[8] = 0.0
+QuasiLocalMeasures::output_vtk_every = $out_every
+
+# -----------------------------------------------------------------------------
+# SphericalSurface
+# -----------------------------------------------------------------------------
+SphericalSurface::nsurfaces = 9
+
+SphericalSurface::maxnphi = 240
+SphericalSurface::maxntheta = 140
+SphericalSurface::nghostsphi[0] = 2
+SphericalSurface::nghostsphi[1] = 2
+SphericalSurface::nghostsphi[2] = 2
+SphericalSurface::nghostsphi[3] = 2
+SphericalSurface::nghostsphi[4] = 2
+SphericalSurface::nghostsphi[5] = 2
+SphericalSurface::nghostsphi[6] = 2
+SphericalSurface::nghostsphi[7] = 2
+SphericalSurface::nghostsphi[8] = 2
+
+SphericalSurface::nghoststheta[0] = 2
+SphericalSurface::nghoststheta[1] = 2
+SphericalSurface::nghoststheta[2] = 2
+SphericalSurface::nghoststheta[3] = 2
+SphericalSurface::nghoststheta[4] = 2
+SphericalSurface::nghoststheta[5] = 2
+SphericalSurface::nghoststheta[6] = 2
+SphericalSurface::nghoststheta[7] = 2
+SphericalSurface::nghoststheta[8] = 2
+
+SphericalSurface::nphi[0] = 96
+SphericalSurface::nphi[1] = 96
+SphericalSurface::nphi[2] = 96
+SphericalSurface::nphi[3] = 96
+SphericalSurface::nphi[4] = 96
+SphericalSurface::nphi[5] = 96
+SphericalSurface::nphi[6] = 96
+SphericalSurface::nphi[7] = 96
+SphericalSurface::nphi[8] = 96
+
+SphericalSurface::ntheta[0] = 105
+SphericalSurface::ntheta[1] = 105
+SphericalSurface::ntheta[2] = 105
+SphericalSurface::ntheta[3] = 105
+SphericalSurface::ntheta[4] = 105
+SphericalSurface::ntheta[5] = 105
+SphericalSurface::ntheta[6] = 105
+SphericalSurface::ntheta[7] = 105
+SphericalSurface::ntheta[8] = 105
+
+SphericalSurface::radius[4] = 50
+SphericalSurface::radius[5] = 100
+SphericalSurface::radius[6] = 150
+SphericalSurface::radius[7] = 200
+SphericalSurface::radius[8] = 250
+
+SphericalSurface::set_spherical[4] = yes
+SphericalSurface::set_spherical[5] = yes
+SphericalSurface::set_spherical[6] = yes
+SphericalSurface::set_spherical[7] = yes
+SphericalSurface::set_spherical[8] = yes
+
+SphericalSurface::symmetric_z[0] = no
+SphericalSurface::symmetric_z[1] = no
+SphericalSurface::symmetric_z[2] = no
+SphericalSurface::symmetric_z[3] = no
+SphericalSurface::symmetric_z[4] = no
+SphericalSurface::symmetric_z[5] = no
+SphericalSurface::symmetric_z[6] = no
+SphericalSurface::symmetric_z[7] = no
+SphericalSurface::symmetric_z[8] = no
+
+# -----------------------------------------------------------------------------
+# VolumeIntegrals_vacuumX
+# -----------------------------------------------------------------------------
+VolumeIntegrals_vacuumX::HamiltonianVarString = "Z4c::HC"
+VolumeIntegrals_vacuumX::Momentum0VarString = "Z4c::MtCx"
+VolumeIntegrals_vacuumX::Momentum1VarString = "Z4c::MtCy"
+VolumeIntegrals_vacuumX::Momentum2VarString = "Z4c::MtCz"
+VolumeIntegrals_vacuumX::enable_file_output = 1
+VolumeIntegrals_vacuumX::outVolIntegral_dir = "$parfile/volume_integration"
+VolumeIntegrals_vacuumX::verbose = 0
+VolumeIntegrals_vacuumX::VolIntegral_out_every = $out_every
+VolumeIntegrals_vacuumX::NumIntegrals = 21
+
+# Full grid
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[1] = "H_M_CnstraintsL2"
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[2] = "H_M2_CnstraintsL2"
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[3] = "ADM_Mass"
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[4] = "ADM_Momentum"
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[5] = "ADM_Angular_Momentum"
+
+# Coordinate ball r <= 100, centered at the origin
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[6] = "H_M_CnstraintsL2"
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[7] = "H_M2_CnstraintsL2"
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[8] = "ADM_Mass"
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[9] = "ADM_Momentum"
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[10] = "ADM_Angular_Momentum"
+VolumeIntegrals_vacuumX::volintegral_inside_sphere__radius[6] = 100.0
+VolumeIntegrals_vacuumX::volintegral_inside_sphere__radius[7] = 100.0
+VolumeIntegrals_vacuumX::volintegral_inside_sphere__radius[8] = 100.0
+VolumeIntegrals_vacuumX::volintegral_inside_sphere__radius[9] = 100.0
+VolumeIntegrals_vacuumX::volintegral_inside_sphere__radius[10] = 100.0
+
+# Coordinate ball r <= 150, centered at the origin
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[11] = "H_M_CnstraintsL2"
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[12] = "H_M2_CnstraintsL2"
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[13] = "ADM_Mass"
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[14] = "ADM_Momentum"
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[15] = "ADM_Angular_Momentum"
+VolumeIntegrals_vacuumX::volintegral_inside_sphere__radius[11] = 150.0
+VolumeIntegrals_vacuumX::volintegral_inside_sphere__radius[12] = 150.0
+VolumeIntegrals_vacuumX::volintegral_inside_sphere__radius[13] = 150.0
+VolumeIntegrals_vacuumX::volintegral_inside_sphere__radius[14] = 150.0
+VolumeIntegrals_vacuumX::volintegral_inside_sphere__radius[15] = 150.0
+
+# Spherical ADM surface diagnostics matching GRChombo-style extraction radii
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[16] = "ADM_Mass_Surface"
+VolumeIntegrals_vacuumX::volintegral_surface_sphere__radius[16] = 100.0
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[17] = "ADM_Momentum_Surface"
+VolumeIntegrals_vacuumX::volintegral_surface_sphere__radius[17] = 100.0
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[18] = "ADM_Angular_Momentum_Surface"
+VolumeIntegrals_vacuumX::volintegral_surface_sphere__radius[18] = 100.0
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[19] = "ADM_Mass_Surface"
+VolumeIntegrals_vacuumX::volintegral_surface_sphere__radius[19] = 150.0
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[20] = "ADM_Momentum_Surface"
+VolumeIntegrals_vacuumX::volintegral_surface_sphere__radius[20] = 150.0
+VolumeIntegrals_vacuumX::Integration_quantity_keyword[21] = "ADM_Angular_Momentum_Surface"
+VolumeIntegrals_vacuumX::volintegral_surface_sphere__radius[21] = 150.0
+
+# =============================================================================
+# Checkpoint
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# CarpetX
+# -----------------------------------------------------------------------------
+CarpetX::checkpoint_method = "openpmd"
+CarpetX::recover_method = "openpmd"
+
+# -----------------------------------------------------------------------------
+# IO
+# -----------------------------------------------------------------------------
+IO::checkpoint_dir = "../checkpoint"
+IO::recover_dir = "../checkpoint"
+IO::checkpoint_ID = no
+#IO::checkpoint_every = 24*$out_every
+IO::checkpoint_every_walltime_hours = 0.9
+IO::checkpoint_on_terminate = yes
+IO::recover = "autoprobe"
+
+# =============================================================================
+# Output
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# CarpetX
+# -----------------------------------------------------------------------------
+CarpetX::out_performance_every = 24*$out_every
+CarpetX::out_norm_omit_unstable = yes
+CarpetX::out_norm_every = $out_every
+CarpetX::out_silo_compression_options = "METHOD=GZIP"
 CarpetX::out_norm_vars = "
+    ADMBaseX::lapse
     ADMBaseX::metric
     ADMBaseX::curv
-    ADMBaseX::lapse
     ADMBaseX::shift
-    ADMBaseX::dtlapse
-    ADMBaseX::dtshift
-    CarpetXRegrid::regrid_error
+    Z4c::HC
+    Z4c::MtC
 "
-CarpetX::out_norm_omit_unstable = yes
-CarpetX::out_norm_every = 1
 
-CarpetX::out_silo_compression_options = "METHOD=GZIP"
 CarpetX::openpmd_format = "ADIOS2_BP5"
 CarpetX::out_openpmd_vars = "
+    ADMBaseX::lapse
     ADMBaseX::metric
     ADMBaseX::curv
-    ADMBaseX::lapse
     ADMBaseX::shift
-    ADMBaseX::dtlapse
-    ADMBaseX::dtshift
-    CarpetXRegrid::regrid_error
+    Z4c::HC
+    Z4c::MtC
 "
+CarpetX::out_openpmd_2d_every = 2*$out_every
+CarpetX::out_openpmd_2d_vars = "
+    ADMBaseX::lapse
+    ADMBaseX::metric
+    ADMBaseX::curv
+    ADMBaseX::shift
+    Z4c::HC
+    Z4c::MtC
+"
+
+IO::out_xyplane_z = 0
+IO::out_xzplane_y = 0
+IO::out_yzplane_x = 0
+
+CarpetX::out_tsv_every = $out_every
+CarpetX::out_tsv_vars = "
+  AHFinderDirect::ah_origin
+  AHFinderDirect::ah_centroid
+  AHFinderDirect::ah_flags
+  PunctureTracker::pt_loc
+  QuasiLocalMeasures::qlm_scalars
+  WeylScal4::Psi4r
+  WeylScal4::Psi4i
+"
+
 CarpetX::out_metadata = no
 
-CarpetX::out_silo_vars = "
-    ADMBaseX::metric
-    ADMBaseX::curv
-    ADMBaseX::lapse
-    ADMBaseX::shift
-    ADMBaseX::dtlapse
-    ADMBaseX::dtshift
-    CarpetXRegrid::regrid_error
-"
-
-CarpetX::out_tsv_vars = "
-    ADMBaseX::metric
-    ADMBaseX::curv
-    ADMBaseX::lapse
-    ADMBaseX::shift
-    ADMBaseX::dtlapse
-    ADMBaseX::dtshift
-    CarpetXRegrid::regrid_error
-"
+# -----------------------------------------------------------------------------
+# IO
+# -----------------------------------------------------------------------------
+IO::out_dir = $parfile
+IO::out_every = 16*$out_every
