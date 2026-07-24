@@ -5,6 +5,7 @@ IMPLEMENTS: GRTresnaIDX
 INHERITS: ADMBaseX CoordinatesX CarpetXRegrid
 
 USES INCLUDE HEADER: loop.hxx
+USES INCLUDE HEADER: loop_device.hxx
 
 PRIVATE:
 

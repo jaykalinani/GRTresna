@@ -1,5 +1,6 @@
 #include "grtresna_reader.hxx"
 
+#include <loop_device.hxx>
 #include <loop.hxx>
 
 #include <cctk.h>
@@ -101,7 +102,7 @@ inline bool determinant_lapse(const ADMSample &s, double &alp_det) {
 }
 
 template <typename T>
-CCTK_HOST CCTK_ATTRIBUTE_ALWAYS_INLINE inline T
+CCTK_DEVICE CCTK_HOST CCTK_ATTRIBUTE_ALWAYS_INLINE inline T
 calc_avg_c2v_order2(const GF3D2<const T> &gf, const PointDesc &p) {
   T gf_avg = 0;
   for (int dk = 0; dk < 2; ++dk) {
@@ -115,11 +116,10 @@ calc_avg_c2v_order2(const GF3D2<const T> &gf, const PointDesc &p) {
 }
 
 template <typename T>
-CCTK_HOST CCTK_ATTRIBUTE_ALWAYS_INLINE inline T
+CCTK_DEVICE CCTK_HOST CCTK_ATTRIBUTE_ALWAYS_INLINE inline T
 calc_avg_c2v_order4(const GF3D2<const T> &gf, const PointDesc &p) {
   T gf_avg = 0;
-  const std::array<T, 4> wt{{-1 / T(16), +9 / T(16), +9 / T(16),
-                             -1 / T(16)}};
+  const vect<T, 4> wt = {-1 / T(16), +9 / T(16), +9 / T(16), -1 / T(16)};
 
   // Symmetrized fourth-order cell-center to vertex interpolation copied into
   // this thorn from the AsterX/AsterUtils stencil pattern.
@@ -127,7 +127,8 @@ calc_avg_c2v_order4(const GF3D2<const T> &gf, const PointDesc &p) {
     const int j = (i == 0) ? 1 : ((i == 1) ? 2 : 0);
     const int k = (i == 0) ? 2 : ((i == 1) ? 0 : 1);
 
-    std::array<std::array<T, 4>, 4> gf_i{};
+    vect<vect<T, 4>, 4> gf_i = {
+        {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
     for (int dk = 0; dk < 4; ++dk) {
       for (int dj = 0; dj < 4; ++dj) {
         for (int di = 0; di < 4; ++di) {
@@ -138,7 +139,7 @@ calc_avg_c2v_order4(const GF3D2<const T> &gf, const PointDesc &p) {
       }
     }
 
-    std::array<T, 4> gf_j{};
+    vect<T, 4> gf_j = {0, 0, 0, 0};
     for (int dk = 0; dk < 4; ++dk) {
       for (int dj = 0; dj < 4; ++dj) {
         gf_j[dk] += wt[dj] * gf_i[dk][dj];
@@ -154,7 +155,7 @@ calc_avg_c2v_order4(const GF3D2<const T> &gf, const PointDesc &p) {
 }
 
 template <typename T>
-CCTK_HOST CCTK_ATTRIBUTE_ALWAYS_INLINE inline T
+CCTK_DEVICE CCTK_HOST CCTK_ATTRIBUTE_ALWAYS_INLINE inline T
 calc_avg_c2v(const GF3D2<const T> &gf, const PointDesc &p, const int order) {
   return order == 4 ? calc_avg_c2v_order4(gf, p)
                     : calc_avg_c2v_order2(gf, p);
@@ -577,9 +578,9 @@ extern "C" void GRTresnaIDX_InitialDataC2V(CCTK_ARGUMENTS) {
     }
   }
 
-  grid.loop_int<0, 0, 0>(
+  grid.loop_int_device<0, 0, 0>(
       grid.nghostzones,
-      [=](const PointDesc &p) CCTK_ATTRIBUTE_ALWAYS_INLINE {
+      [=] CCTK_DEVICE(const PointDesc &p) CCTK_ATTRIBUTE_ALWAYS_INLINE {
         gxx(p.I) = calc_avg_c2v(gxx_cell, p, order);
         gxy(p.I) = calc_avg_c2v(gxy_cell, p, order);
         gxz(p.I) = calc_avg_c2v(gxz_cell, p, order);
