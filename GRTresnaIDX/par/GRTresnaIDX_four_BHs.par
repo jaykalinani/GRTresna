@@ -1,0 +1,147 @@
+# run.me:
+# run.cores: 4
+# run.memory: 1.0e9
+# run.time: 60.0
+#
+# Direct-reader four-BH setup using precomputed GRTresna data.
+# This uses GRTresnaIDX to sample the GRTresna/Chombo AMR HDF5 file and
+# populate ADMBaseX. It does not solve the constraints on the fly.
+#
+# The source file is a four-level Chombo AMR hierarchy with base dx=0.625
+# over [-40,40]^3. CarpetX is configured here with the same base domain,
+# but only two CarpetX levels for this ID-matched comparison run.
+# GRTresnaIDX tags CarpetX cells covered by the next-finer source HDF5 boxes
+# so the initial CarpetX regrid loop creates a comparable coarse/fine grid,
+# then samples from the finest source level containing each query point.
+
+ActiveThorns = "
+    ADMBaseX
+    CarpetX
+    CarpetXRegrid
+    CoordinatesX
+    Formaline
+    GRTresnaIDX
+    IOUtil
+    ODESolvers
+"
+
+Cactus::cctk_show_schedule = no
+Cactus::presync_mode = "mixed-error"
+Cactus::cctk_itlast = 0
+
+ODESolvers::method = "constant"
+
+CarpetX::verbose = no
+CarpetX::poison_undefined_values = yes
+
+CarpetX::xmin = -40.0
+CarpetX::ymin = -40.0
+CarpetX::zmin = -40.0
+CarpetX::xmax = +40.0
+CarpetX::ymax = +40.0
+CarpetX::zmax = +40.0
+
+CarpetX::ncells_x = 128
+CarpetX::ncells_y = 128
+CarpetX::ncells_z = 128
+
+CarpetX::periodic_x = no
+CarpetX::periodic_y = no
+CarpetX::periodic_z = no
+
+CarpetX::boundary_x = "neumann"
+CarpetX::boundary_y = "neumann"
+CarpetX::boundary_z = "neumann"
+CarpetX::boundary_upper_x = "neumann"
+CarpetX::boundary_upper_y = "neumann"
+CarpetX::boundary_upper_z = "neumann"
+
+CarpetX::ghost_size = 3
+
+CarpetX::max_tile_size_x = 1024000
+CarpetX::max_tile_size_y = 1024000
+CarpetX::max_tile_size_z = 1024000
+
+# Match the saved InitialConditionSolver_BHCluster quartet ID:
+# L=80, N=128^3, max_level=3, refine_threshold=0.5,
+# fill_ratio=0.7. Keep CarpetX blocking_factor=1 and choose
+# max_grid_size for 8 GPUs: 128^3 -> 2 x 2 x 2 = 8 base boxes.
+CarpetX::blocking_factor_x = 1
+CarpetX::blocking_factor_y = 1
+CarpetX::blocking_factor_z = 1
+CarpetX::max_grid_size_x = 64
+CarpetX::max_grid_size_y = 64
+CarpetX::max_grid_size_z = 64
+CarpetX::max_num_levels = 4
+CarpetX::regrid_every = 1
+CarpetX::regrid_error_threshold = 0.5
+
+ADMBaseX::initial_data = "GRTresnaIDX"
+ADMBaseX::initial_lapse = "GRTresnaIDX"
+ADMBaseX::initial_shift = "GRTresnaIDX"
+ADMBaseX::initial_dtlapse = "zero"
+ADMBaseX::initial_dtshift = "zero"
+
+GRTresnaIDX::grtresna_filename = "/work/hdd/bgmi/jkalinan/ID_BHClusterX/InitialConditionsFinal_BH_quartet.3d.hdf5"
+GRTresnaIDX::grtresna_format = "grtresna_hdf5"
+GRTresnaIDX::adm_population_method = "cell-centered-c2v"
+GRTresnaIDX::c2v_order = 2
+GRTresnaIDX::interpolation = "nearest"
+GRTresnaIDX::out_of_bounds = "clamp"
+GRTresnaIDX::lapse_profile = "file"
+GRTresnaIDX::sanity_checks = no
+GRTresnaIDX::set_source_regrid_error = yes
+GRTresnaIDX::extra_coarse_levels = 0
+GRTresnaIDX::use_source_center = no
+GRTresnaIDX::chi_floor = 1.0e-14
+GRTresnaIDX::verbosity = 2
+
+IO::out_dir = $parfile
+IO::out_every = 1
+IO::out_mode = "np"
+IO::out_proc_every = 1
+
+CarpetX::out_norm_vars = "
+    ADMBaseX::metric
+    ADMBaseX::curv
+    ADMBaseX::lapse
+    ADMBaseX::shift
+    ADMBaseX::dtlapse
+    ADMBaseX::dtshift
+    CarpetXRegrid::regrid_error
+"
+CarpetX::out_norm_omit_unstable = yes
+CarpetX::out_norm_every = 1
+
+CarpetX::out_silo_compression_options = "METHOD=GZIP"
+CarpetX::openpmd_format = "ADIOS2_BP5"
+CarpetX::out_openpmd_vars = "
+    ADMBaseX::metric
+    ADMBaseX::curv
+    ADMBaseX::lapse
+    ADMBaseX::shift
+    ADMBaseX::dtlapse
+    ADMBaseX::dtshift
+    CarpetXRegrid::regrid_error
+"
+CarpetX::out_metadata = no
+
+CarpetX::out_silo_vars = "
+    ADMBaseX::metric
+    ADMBaseX::curv
+    ADMBaseX::lapse
+    ADMBaseX::shift
+    ADMBaseX::dtlapse
+    ADMBaseX::dtshift
+    CarpetXRegrid::regrid_error
+"
+
+CarpetX::out_tsv_vars = "
+    ADMBaseX::metric
+    ADMBaseX::curv
+    ADMBaseX::lapse
+    ADMBaseX::shift
+    ADMBaseX::dtlapse
+    ADMBaseX::dtshift
+    CarpetXRegrid::regrid_error
+"

@@ -71,6 +71,11 @@ INT extra_coarse_levels "Number of CarpetX levels coarser than source level 0 wh
   0:* :: "0 means CarpetX level 0 matches source level 0"
 } 0
 
+INT source_level_offset "Additional source AMR level offset added after extra_coarse_levels mapping"
+{
+  *:* :: "0 preserves CarpetX level to source level mapping; positive values use finer source levels"
+} 0
+
 BOOLEAN use_source_center "Use source_center[] instead of auto-centering from source index extents"
 {
 } "no"

@@ -162,12 +162,14 @@ calc_avg_c2v(const GF3D2<const T> &gf, const PointDesc &p, const int order) {
 
 inline int preferred_source_level_for_grid(const GRTresnaReader *reader,
                                            const int carpet_level,
-                                           const int extra_coarse) {
+                                           const int extra_coarse,
+                                           const int source_offset) {
   if (reader == nullptr) {
     return -1;
   }
 
-  const int requested = carpet_level - std::max(0, extra_coarse);
+  const int requested =
+      carpet_level - std::max(0, extra_coarse) + source_offset;
   return requested >= 0 && requested < reader->num_levels() ? requested : -1;
 }
 
@@ -280,7 +282,8 @@ extern "C" void GRTresnaIDX_InitialData(CCTK_ARGUMENTS) {
   grid_all_coordinate_bounds<0, 0, 0>(grid, xmin, ymin, zmin, xmax, ymax,
                                       zmax);
   const int preferred_source_level = preferred_source_level_for_grid(
-      reader, static_cast<int>(grid.level), static_cast<int>(extra_coarse_levels));
+      reader, static_cast<int>(grid.level), static_cast<int>(extra_coarse_levels),
+      static_cast<int>(source_level_offset));
   if (verbosity >= 2 && CCTK_MyProc(cctkGH) == 0) {
     CCTK_VINFO("GRTresnaIDX direct fill on CarpetX level %d prefers source level %d",
                int(grid.level), preferred_source_level);
@@ -441,7 +444,8 @@ extern "C" void GRTresnaIDX_InitialDataCell(CCTK_ARGUMENTS) {
   grid_all_coordinate_bounds<1, 1, 1>(grid, xmin, ymin, zmin, xmax, ymax,
                                       zmax);
   const int preferred_source_level = preferred_source_level_for_grid(
-      reader, static_cast<int>(grid.level), static_cast<int>(extra_coarse_levels));
+      reader, static_cast<int>(grid.level), static_cast<int>(extra_coarse_levels),
+      static_cast<int>(source_level_offset));
   if (verbosity >= 2 && CCTK_MyProc(cctkGH) == 0) {
     CCTK_VINFO(
         "GRTresnaIDX cell-centered fill on CarpetX level %d prefers source level %d",
@@ -615,6 +619,7 @@ extern "C" void GRTresnaIDX_SourceRegridError(CCTK_ARGUMENTS) {
 
   const auto *reader = g_reader.get();
   const int offset = std::max(0, static_cast<int>(extra_coarse_levels));
+  const int source_offset = static_cast<int>(source_level_offset);
   const int carpet_level = static_cast<int>(grid.level);
 
   const bool coarse_level = carpet_level < offset;
@@ -625,7 +630,7 @@ extern "C" void GRTresnaIDX_SourceRegridError(CCTK_ARGUMENTS) {
           ? std::ldexp(source_radius, offset - carpet_level - 1)
           : 0.0;
 
-  const int target_source_level = carpet_level - offset + 1;
+  const int target_source_level = carpet_level - offset + source_offset + 1;
   const bool have_target_level =
       target_source_level >= 0 && target_source_level < reader->num_levels();
 
