@@ -236,8 +236,9 @@ extern "C" void GRTresnaIDX_ParamCheck(CCTK_ARGUMENTS) {
     CCTK_ERROR("GRTresnaIDX: c2v_order must be either 2 or 4");
   }
   if (!(CCTK_EQUALS(out_of_bounds, "clamp") ||
-        CCTK_EQUALS(out_of_bounds, "error"))) {
-    CCTK_ERROR("GRTresnaIDX: out_of_bounds must be clamp or error");
+        CCTK_EQUALS(out_of_bounds, "error") ||
+        CCTK_EQUALS(out_of_bounds, "asymptotic"))) {
+    CCTK_ERROR("GRTresnaIDX: out_of_bounds must be clamp, error, or asymptotic");
   }
   if (!(CCTK_EQUALS(lapse_profile, "file") ||
         CCTK_EQUALS(lapse_profile, "determinant-psi"))) {
@@ -267,8 +268,11 @@ extern "C" void GRTresnaIDX_InitialData(CCTK_ARGUMENTS) {
       CCTK_EQUALS(interpolation, "nearest") ? InterpolationMethod::nearest
                                             : InterpolationMethod::trilinear;
   const OutOfBoundsPolicy oob_policy =
-      CCTK_EQUALS(out_of_bounds, "error") ? OutOfBoundsPolicy::error
-                                          : OutOfBoundsPolicy::clamp;
+      CCTK_EQUALS(out_of_bounds, "error")
+          ? OutOfBoundsPolicy::error
+          : (CCTK_EQUALS(out_of_bounds, "asymptotic")
+                 ? OutOfBoundsPolicy::asymptotic
+                 : OutOfBoundsPolicy::clamp);
   const bool use_determinant_lapse =
       write_lapse && CCTK_EQUALS(lapse_profile, "determinant-psi");
   const bool sample_metric_curv = write_metric_curv || use_determinant_lapse;
@@ -289,8 +293,11 @@ extern "C" void GRTresnaIDX_InitialData(CCTK_ARGUMENTS) {
     CCTK_VINFO("GRTresnaIDX direct fill on CarpetX level %d prefers source level %d",
                int(grid.level), preferred_source_level);
   }
-  reader->prefetch_region(xmin, ymin, zmin, xmax, ymax, zmax, interp_method,
-                          preferred_source_level);
+  if (!(oob_policy == OutOfBoundsPolicy::asymptotic &&
+        preferred_source_level < 0)) {
+    reader->prefetch_region(xmin, ymin, zmin, xmax, ymax, zmax, interp_method,
+                            preferred_source_level);
+  }
 
   std::atomic<bool> sample_failed(false);
   const bool do_sanity_checks = sanity_checks && write_metric_curv;
@@ -430,8 +437,11 @@ extern "C" void GRTresnaIDX_InitialDataCell(CCTK_ARGUMENTS) {
       CCTK_EQUALS(interpolation, "nearest") ? InterpolationMethod::nearest
                                             : InterpolationMethod::trilinear;
   const OutOfBoundsPolicy oob_policy =
-      CCTK_EQUALS(out_of_bounds, "error") ? OutOfBoundsPolicy::error
-                                          : OutOfBoundsPolicy::clamp;
+      CCTK_EQUALS(out_of_bounds, "error")
+          ? OutOfBoundsPolicy::error
+          : (CCTK_EQUALS(out_of_bounds, "asymptotic")
+                 ? OutOfBoundsPolicy::asymptotic
+                 : OutOfBoundsPolicy::clamp);
   const bool use_determinant_lapse =
       CCTK_EQUALS(lapse_profile, "determinant-psi");
   const bool sample_file_lapse = !use_determinant_lapse;
@@ -452,8 +462,11 @@ extern "C" void GRTresnaIDX_InitialDataCell(CCTK_ARGUMENTS) {
         "GRTresnaIDX cell-centered fill on CarpetX level %d prefers source level %d",
         int(grid.level), preferred_source_level);
   }
-  reader->prefetch_region(xmin, ymin, zmin, xmax, ymax, zmax, interp_method,
-                          preferred_source_level);
+  if (!(oob_policy == OutOfBoundsPolicy::asymptotic &&
+        preferred_source_level < 0)) {
+    reader->prefetch_region(xmin, ymin, zmin, xmax, ymax, zmax, interp_method,
+                            preferred_source_level);
+  }
 
   std::atomic<bool> sample_failed(false);
   const bool do_sanity_checks = sanity_checks;

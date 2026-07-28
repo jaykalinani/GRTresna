@@ -48,8 +48,9 @@ INT c2v_order "Cell-centered to vertex-centered interpolation order for adm_popu
 
 KEYWORD out_of_bounds "Behavior when a CarpetX point is outside the source domain"
 {
-  "clamp"   :: "Clamp to nearest valid source cell"
-  "error"   :: "Abort run with an actionable error message"
+  "clamp"      :: "Clamp to nearest valid source cell"
+  "error"      :: "Abort run with an actionable error message"
+  "asymptotic" :: "Use a boundary-matched asymptotically flat exterior"
 } "clamp"
 
 KEYWORD lapse_profile "How to initialize lapse when ADMBaseX::initial_lapse is GRTresnaIDX"

@@ -1591,6 +1591,94 @@ bool GRTresnaReader::sample_adm_nearest(
   return false;
 }
 
+bool GRTresnaReader::sample_adm_asymptotic(
+    const double x, const double y, const double z,
+    const InterpolationMethod method, ADMSample &out,
+    const bool need_metric_curv, const bool need_lapse, const bool need_shift,
+    const int preferred_source_level) const {
+  if (!loaded_ || levels_.empty()) {
+    return false;
+  }
+
+  const auto &base = levels_[0];
+  const double pos[3] = {x, y, z};
+  double lambda = 1.0;
+  for (int d = 0; d < 3; ++d) {
+    const double lower =
+        static_cast<double>(base.lo_union[d]) * base.dx - center_[d];
+    const double upper =
+        static_cast<double>(base.hi_union[d] + 1) * base.dx - center_[d];
+
+    if (pos[d] > upper) {
+      if (!(pos[d] > 0.0)) {
+        return false;
+      }
+      lambda = std::min(lambda, upper / pos[d]);
+    } else if (pos[d] < lower) {
+      if (!(pos[d] < 0.0)) {
+        return false;
+      }
+      lambda = std::min(lambda, lower / pos[d]);
+    }
+  }
+
+  if (!(std::isfinite(lambda) && lambda > 0.0 && lambda <= 1.0)) {
+    return false;
+  }
+
+  const double xb = lambda * x;
+  const double yb = lambda * y;
+  const double zb = lambda * z;
+  const double r = std::sqrt(x * x + y * y + z * z);
+  const double rb = std::sqrt(xb * xb + yb * yb + zb * zb);
+  const double falloff =
+      (r > 0.0 && rb > 0.0) ? std::min(1.0, rb / r) : 1.0;
+  if (!(std::isfinite(falloff) && falloff >= 0.0 && falloff <= 1.0)) {
+    return false;
+  }
+
+  ADMSample boundary{};
+  const int boundary_level =
+      preferred_source_level >= 0 && preferred_source_level < num_levels_
+          ? preferred_source_level
+          : 0;
+  if (!sample_adm(xb, yb, zb, method, OutOfBoundsPolicy::clamp, boundary,
+                  need_metric_curv, need_lapse, need_shift, boundary_level)) {
+    return false;
+  }
+
+  const double metric_falloff = falloff;
+  const double curv_falloff = falloff * falloff;
+  const double shift_falloff = falloff * falloff;
+
+  if (need_metric_curv) {
+    out.gxx = 1.0 + (boundary.gxx - 1.0) * metric_falloff;
+    out.gxy = boundary.gxy * metric_falloff;
+    out.gxz = boundary.gxz * metric_falloff;
+    out.gyy = 1.0 + (boundary.gyy - 1.0) * metric_falloff;
+    out.gyz = boundary.gyz * metric_falloff;
+    out.gzz = 1.0 + (boundary.gzz - 1.0) * metric_falloff;
+
+    out.kxx = boundary.kxx * curv_falloff;
+    out.kxy = boundary.kxy * curv_falloff;
+    out.kxz = boundary.kxz * curv_falloff;
+    out.kyy = boundary.kyy * curv_falloff;
+    out.kyz = boundary.kyz * curv_falloff;
+    out.kzz = boundary.kzz * curv_falloff;
+  }
+
+  if (need_lapse) {
+    out.alp = 1.0 + (boundary.alp - 1.0) * metric_falloff;
+  }
+  if (need_shift) {
+    out.betax = boundary.betax * shift_falloff;
+    out.betay = boundary.betay * shift_falloff;
+    out.betaz = boundary.betaz * shift_falloff;
+  }
+
+  return adm_sample_is_valid(out, need_metric_curv, need_lapse, need_shift);
+}
+
 double GRTresnaReader::sample_component_nearest(
     const int comp, const double x, const double y, const double z,
     const OutOfBoundsPolicy oob_policy, bool &ok,
@@ -1925,6 +2013,35 @@ bool GRTresnaReader::sample_adm(const double x, const double y, const double z,
 
   if (!(need_metric_curv || need_lapse || need_shift)) {
     return true;
+  }
+
+  if (oob_policy == OutOfBoundsPolicy::asymptotic) {
+    bool outside_base_domain = false;
+    if (loaded_ && !levels_.empty()) {
+      const auto &base = levels_[0];
+      const double pos[3] = {x, y, z};
+      for (int d = 0; d < 3; ++d) {
+        const double lower =
+            static_cast<double>(base.lo_union[d]) * base.dx - center_[d];
+        const double upper =
+            static_cast<double>(base.hi_union[d] + 1) * base.dx - center_[d];
+        outside_base_domain |= pos[d] < lower || pos[d] > upper;
+      }
+    }
+    if (outside_base_domain) {
+      return sample_adm_asymptotic(x, y, z, method, out, need_metric_curv,
+                                   need_lapse, need_shift,
+                                   preferred_source_level);
+    }
+
+    if (sample_adm(x, y, z, method, OutOfBoundsPolicy::error, out,
+                   need_metric_curv, need_lapse, need_shift,
+                   preferred_source_level)) {
+      return true;
+    }
+    return sample_adm_asymptotic(x, y, z, method, out, need_metric_curv,
+                                 need_lapse, need_shift,
+                                 preferred_source_level);
   }
 
   if (method == InterpolationMethod::nearest) {

@@ -16,7 +16,7 @@
 namespace GRTresnaIDX {
 
 enum class InterpolationMethod { nearest, trilinear };
-enum class OutOfBoundsPolicy { clamp, error };
+enum class OutOfBoundsPolicy { clamp, error, asymptotic };
 
 struct ReaderConfig {
   bool use_source_center = false;
@@ -185,6 +185,11 @@ private:
                           OutOfBoundsPolicy oob_policy, ADMSample &out,
                           bool need_metric_curv, bool need_lapse,
                           bool need_shift, int preferred_source_level) const;
+  bool sample_adm_asymptotic(double x, double y, double z,
+                             InterpolationMethod method, ADMSample &out,
+                             bool need_metric_curv, bool need_lapse,
+                             bool need_shift,
+                             int preferred_source_level) const;
 
   double sample_component_nearest(int comp, double x, double y, double z,
                                   OutOfBoundsPolicy oob_policy,
